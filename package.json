@@ -1,0 +1,21 @@
+{
+  "name": "discord-resource-tracker-bot",
+  "version": "1.0.0",
+  "description": "A Discord bot to track player resources for game playtesting",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "game",
+    "resources"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^17.2.3"
+  }
+}
