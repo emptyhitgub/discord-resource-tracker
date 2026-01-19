@@ -168,42 +168,50 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('status')
-        .setDescription('Add a status effect (buff/debuff) to a player')
-        .addStringOption(option =>
-            option.setName('name')
-                .setDescription('Name of the status effect (e.g., Bleed, Haste, Poisoned)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('duration')
-                .setDescription('Duration in turns')
-                .setRequired(true))
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('The player to apply status to (leave empty for yourself)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('removestatus')
-        .setDescription('Remove a status effect from a player')
-        .addStringOption(option =>
-            option.setName('name')
-                .setDescription('Name of the status effect to remove')
-                .setRequired(true))
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('The player to remove status from (leave empty for yourself)')
-                .setRequired(false)),
+        .setDescription('Manage status effects (buffs/debuffs)')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('add')
+                .setDescription('Add a status effect')
+                .addStringOption(option =>
+                    option.setName('name')
+                        .setDescription('Name of the status effect (e.g., Bleed, Haste)')
+                        .setRequired(true))
+                .addIntegerOption(option =>
+                    option.setName('duration')
+                        .setDescription('Duration in turns')
+                        .setRequired(true))
+                .addUserOption(option =>
+                    option.setName('player')
+                        .setDescription('Player to apply status to (leave empty for yourself)')
+                        .setRequired(false)))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('clear')
+                .setDescription('Remove a status effect')
+                .addStringOption(option =>
+                    option.setName('name')
+                        .setDescription('Name of the status effect to remove')
+                        .setRequired(true))
+                .addUserOption(option =>
+                    option.setName('player')
+                        .setDescription('Player to remove status from (leave empty for yourself)')
+                        .setRequired(false))),
 
     new SlashCommandBuilder()
         .setName('tick')
-        .setDescription('Advance your turn by 1 (reduces YOUR status durations by 1)'),
+        .setDescription('Advance turn by 1 (reduces status durations by 1)')
+        .addUserOption(option =>
+            option.setName('player')
+                .setDescription('Player to advance turn for (leave empty for yourself)')
+                .setRequired(false)),
 
     new SlashCommandBuilder()
         .setName('hp')
         .setDescription('Update your HP quickly')
         .addStringOption(option =>
             option.setName('amount')
-                .setDescription('Amount to change (use "full" to restore to max)')
+                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
                 .setRequired(true)),
 
     new SlashCommandBuilder()
@@ -211,7 +219,7 @@ const commands = [
         .setDescription('Update your MP quickly')
         .addStringOption(option =>
             option.setName('amount')
-                .setDescription('Amount to change (use "full" to restore to max)')
+                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
                 .setRequired(true)),
 
     new SlashCommandBuilder()
@@ -219,7 +227,7 @@ const commands = [
         .setDescription('Update your IP quickly')
         .addStringOption(option =>
             option.setName('amount')
-                .setDescription('Amount to change (use "full" to restore to max)')
+                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
                 .setRequired(true)),
 
     new SlashCommandBuilder()
@@ -227,7 +235,7 @@ const commands = [
         .setDescription('Update your Armor quickly')
         .addStringOption(option =>
             option.setName('amount')
-                .setDescription('Amount to change (use "full" to restore to max)')
+                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
                 .setRequired(true)),
 
     new SlashCommandBuilder()
@@ -235,7 +243,7 @@ const commands = [
         .setDescription('Update your Barrier quickly')
         .addStringOption(option =>
             option.setName('amount')
-                .setDescription('Amount to change (use "full" to restore to max)')
+                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
                 .setRequired(true)),
 
     new SlashCommandBuilder()
@@ -256,30 +264,84 @@ const commands = [
         .setDescription('View all players and their resources in detail'),
 
     new SlashCommandBuilder()
-        .setName('startencounter')
-        .setDescription('Start a new encounter (GM only)')
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-    new SlashCommandBuilder()
-        .setName('endencounter')
-        .setDescription('End the current encounter (GM only)')
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-    new SlashCommandBuilder()
-        .setName('addcombatant')
-        .setDescription('Add a player to the active encounter')
+        .setName('delete')
+        .setDescription('Delete a player\'s data')
         .addUserOption(option =>
             option.setName('player')
-                .setDescription('The player to add (leave empty to add yourself)')
+                .setDescription('The player whose data to delete')
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('damage')
+        .setDescription('Apply damage (reduces Armor/Barrier first, then HP)')
+        .addIntegerOption(option =>
+            option.setName('amount')
+                .setDescription('Amount of damage')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('type')
+                .setDescription('Type of protection to use first')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Armor', value: 'armor' },
+                    { name: 'Barrier', value: 'barrier' }
+                ))
+        .addStringOption(option =>
+            option.setName('players')
+                .setDescription('Players to damage (mention multiple: @player1 @player2, or leave empty for self)')
                 .setRequired(false)),
 
     new SlashCommandBuilder()
-        .setName('removecombatant')
-        .setDescription('Remove a player from the active encounter')
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('The player to remove')
+        .setName('attack')
+        .setDescription('Roll attack dice with damage calculation')
+        .addIntegerOption(option =>
+            option.setName('maindice')
+                .setDescription('Main dice size (e.g., 10 for d10)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('subdice')
+                .setDescription('Sub dice size (e.g., 8 for d8)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('modifier')
+                .setDescription('Damage modifier (added to HighRoll)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('gate')
+                .setDescription('Gate threshold (miss if main dice ≤ gate)')
                 .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('clash')
+        .setDescription('Manage combat encounters')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('start')
+                .setDescription('Start a new encounter (GM only)'))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('end')
+                .setDescription('End the current encounter (GM only)'))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('add')
+                .setDescription('Add players to the encounter')
+                .addStringOption(option =>
+                    option.setName('players')
+                        .setDescription('Players to add (mention: @player1 @player2, or leave empty for yourself)')
+                        .setRequired(false)))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('remove')
+                .setDescription('Remove players from the encounter')
+                .addStringOption(option =>
+                    option.setName('players')
+                        .setDescription('Players to remove (mention: @player1 @player2)')
+                        .setRequired(false)))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('list')
+                .setDescription('List all combatants in the active encounter')),
 
     new SlashCommandBuilder()
         .setName('guide')
@@ -455,10 +517,28 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
+            // Handle "zero" command
+            if (amountStr.toLowerCase() === 'zero') {
+                const oldValue = data[resource];
+                const maxValue = data[`max${resource}`];
+                data[resource] = 0;
+
+                saveData(); // Save after modification
+
+                const embed = new EmbedBuilder()
+                    .setColor(0xFF0000)
+                    .setTitle(`${data.characterName}'s ${RESOURCE_EMOJIS[resource]} ${resource} Set to Zero`)
+                    .setDescription(`${oldValue}/${maxValue} → **0/${maxValue}**`)
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+                return;
+            }
+
             // Parse amount
             const amount = parseInt(amountStr);
             if (isNaN(amount)) {
-                await interaction.reply({ content: 'Please enter a valid number or "full"', ephemeral: true });
+                await interaction.reply({ content: 'Please enter a valid number, "full", or "zero"', ephemeral: true });
                 return;
             }
 
@@ -507,84 +587,90 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'status') {
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = player.id === interaction.user.id 
-                ? interaction.member 
-                : await interaction.guild.members.fetch(player.id);
-            const statusName = interaction.options.getString('name');
-            const duration = interaction.options.getInteger('duration');
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            // Check if status already exists
-            const existingIndex = data.statusEffects.findIndex(s => s.name.toLowerCase() === statusName.toLowerCase());
+            const subcommand = interaction.options.getSubcommand();
             
-            if (existingIndex !== -1) {
-                // Update existing status duration
-                data.statusEffects[existingIndex].duration = duration;
+            if (subcommand === 'add') {
+                const player = interaction.options.getUser('player') || interaction.user;
+                const playerMember = player.id === interaction.user.id 
+                    ? interaction.member 
+                    : await interaction.guild.members.fetch(player.id);
+                const statusName = interaction.options.getString('name');
+                const duration = interaction.options.getInteger('duration');
+
+                initPlayer(player.id, playerMember.displayName);
+                const data = playerData.get(player.id);
+
+                // Check if status already exists
+                const existingIndex = data.statusEffects.findIndex(s => s.name.toLowerCase() === statusName.toLowerCase());
                 
-                saveData(); // Save after modification
+                if (existingIndex !== -1) {
+                    // Update existing status duration
+                    data.statusEffects[existingIndex].duration = duration;
+                    
+                    saveData();
+
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFFAA00)
+                        .setTitle(`🔄 Status Updated`)
+                        .setDescription(`**${statusName}** on ${data.characterName} updated to ${duration} turns`)
+                        .setTimestamp();
+
+                    await interaction.reply({ embeds: [embed] });
+                } else {
+                    // Add new status
+                    data.statusEffects.push({ name: statusName, duration: duration });
+
+                    saveData();
+
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFF6B6B)
+                        .setTitle(`✨ Status Applied`)
+                        .setDescription(`**${statusName}** applied to ${data.characterName} for ${duration} turns`)
+                        .setTimestamp();
+
+                    await interaction.reply({ embeds: [embed] });
+                }
+            } else if (subcommand === 'clear') {
+                const player = interaction.options.getUser('player') || interaction.user;
+                const playerMember = player.id === interaction.user.id 
+                    ? interaction.member 
+                    : await interaction.guild.members.fetch(player.id);
+                const statusName = interaction.options.getString('name');
+
+                initPlayer(player.id, playerMember.displayName);
+                const data = playerData.get(player.id);
+
+                const index = data.statusEffects.findIndex(s => s.name.toLowerCase() === statusName.toLowerCase());
+
+                if (index === -1) {
+                    await interaction.reply({ content: `${data.characterName} doesn't have the status **${statusName}**`, ephemeral: true });
+                    return;
+                }
+
+                data.statusEffects.splice(index, 1);
+
+                saveData();
 
                 const embed = new EmbedBuilder()
-                    .setColor(0xFFAA00)
-                    .setTitle(`🔄 Status Updated`)
-                    .setDescription(`**${statusName}** on ${data.characterName} updated to ${duration} turns`)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-            } else {
-                // Add new status
-                data.statusEffects.push({ name: statusName, duration: duration });
-
-                saveData(); // Save after modification
-
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF6B6B)
-                    .setTitle(`✨ Status Applied`)
-                    .setDescription(`**${statusName}** applied to ${data.characterName} for ${duration} turns`)
+                    .setColor(0x00FF00)
+                    .setTitle(`🗑️ Status Removed`)
+                    .setDescription(`**${statusName}** removed from ${data.characterName}`)
                     .setTimestamp();
 
                 await interaction.reply({ embeds: [embed] });
             }
-
-        } else if (commandName === 'removestatus') {
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = player.id === interaction.user.id 
-                ? interaction.member 
-                : await interaction.guild.members.fetch(player.id);
-            const statusName = interaction.options.getString('name');
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            const index = data.statusEffects.findIndex(s => s.name.toLowerCase() === statusName.toLowerCase());
-
-            if (index === -1) {
-                await interaction.reply({ content: `${data.characterName} doesn't have the status **${statusName}**`, ephemeral: true });
-                return;
-            }
-
-            data.statusEffects.splice(index, 1);
-
-            saveData(); // Save after modification
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle(`🗑️ Status Removed`)
-                .setDescription(`**${statusName}** removed from ${data.characterName}`)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'tick') {
-            const player = interaction.user;
-            const playerMember = interaction.member;
+            const player = interaction.options.getUser('player') || interaction.user;
+            const playerMember = player.id === interaction.user.id 
+                ? interaction.member 
+                : await interaction.guild.members.fetch(player.id);
+            
             initPlayer(player.id, playerMember.displayName);
             const data = playerData.get(player.id);
 
             if (!data.statusEffects || data.statusEffects.length === 0) {
-                await interaction.reply({ content: 'You have no status effects to tick.', ephemeral: true });
+                await interaction.reply({ content: `${data.characterName} has no status effects to tick.`, ephemeral: true });
                 return;
             }
 
@@ -635,6 +721,149 @@ client.on('interactionCreate', async interaction => {
                 .setColor(0xFF0000)
                 .setTitle('⚠️ All Player Data Reset')
                 .setDescription('All player resources have been cleared and file deleted.')
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+
+        } else if (commandName === 'delete') {
+            const player = interaction.options.getUser('player');
+            
+            if (!playerData.has(player.id)) {
+                await interaction.reply({ content: `No data found for ${player.username}`, ephemeral: true });
+                return;
+            }
+
+            const characterName = playerData.get(player.id).characterName;
+            playerData.delete(player.id);
+            saveData();
+
+            const embed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle('🗑️ Player Data Deleted')
+                .setDescription(`All data for ${characterName} has been removed.`)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+
+        } else if (commandName === 'damage') {
+            const damageAmount = interaction.options.getInteger('amount');
+            const damageType = interaction.options.getString('type');
+            const playersInput = interaction.options.getString('players');
+
+            // Parse players from mentions or default to self
+            let targetPlayers = [];
+            if (playersInput) {
+                const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
+                targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
+            } else {
+                targetPlayers = [interaction.user.id];
+            }
+
+            const results = [];
+            const protectionResource = damageType === 'armor' ? 'Armor' : 'Barrier';
+
+            for (const userId of targetPlayers) {
+                try {
+                    const playerMember = await interaction.guild.members.fetch(userId);
+                    initPlayer(userId, playerMember.displayName);
+                    const data = playerData.get(userId);
+
+                    let remainingDamage = damageAmount;
+                    let protectionUsed = 0;
+                    let hpLost = 0;
+                    
+                    // First, reduce protection (Armor or Barrier)
+                    if (data[protectionResource] > 0) {
+                        if (data[protectionResource] >= remainingDamage) {
+                            // Protection absorbs all damage
+                            protectionUsed = remainingDamage;
+                            data[protectionResource] -= remainingDamage;
+                            remainingDamage = 0;
+                        } else {
+                            // Protection absorbs some, rest goes to HP
+                            protectionUsed = data[protectionResource];
+                            remainingDamage -= data[protectionResource];
+                            data[protectionResource] = 0;
+                        }
+                    }
+
+                    // Apply remaining damage to HP
+                    if (remainingDamage > 0) {
+                        hpLost = remainingDamage;
+                        data.HP -= remainingDamage;
+                    }
+
+                    results.push({
+                        name: data.characterName,
+                        protectionUsed,
+                        hpLost,
+                        currentHP: data.HP,
+                        maxHP: data.maxHP,
+                        currentProtection: data[protectionResource],
+                        maxProtection: data[`max${protectionResource}`]
+                    });
+                } catch (error) {
+                    console.error(`Error processing player ${userId}:`, error);
+                }
+            }
+
+            saveData();
+
+            const embed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle(`💥 ${damageAmount} Damage Applied!`)
+                .setDescription(`Type: ${protectionResource}`)
+                .setTimestamp();
+
+            for (const result of results) {
+                embed.addFields({
+                    name: `${result.name}`,
+                    value: `${RESOURCE_EMOJIS[protectionResource]} Absorbed: ${result.protectionUsed} | ${RESOURCE_EMOJIS.HP} Lost: ${result.hpLost}\n${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP} | ${RESOURCE_EMOJIS[protectionResource]} ${protectionResource}: ${result.currentProtection}/${result.maxProtection}`,
+                    inline: false
+                });
+            }
+
+            await interaction.reply({ embeds: [embed] });
+
+        } else if (commandName === 'attack') {
+            const mainDice = interaction.options.getInteger('maindice');
+            const subDice = interaction.options.getInteger('subdice');
+            const modifier = interaction.options.getInteger('modifier');
+            const gate = interaction.options.getInteger('gate');
+
+            // Roll the dice
+            const mainRoll = Math.floor(Math.random() * mainDice) + 1;
+            const subRoll = Math.floor(Math.random() * subDice) + 1;
+            const total = mainRoll + subRoll;
+            const highRoll = Math.max(mainRoll, subRoll);
+            const damage = highRoll + modifier;
+
+            // Determine hit/miss
+            const isHit = mainRoll > gate;
+            const isFumble = mainRoll === 1 && subRoll === 1;
+            const isCrit = !isFumble && mainRoll === subRoll && mainRoll > 6;
+
+            // Build result text
+            let resultText = `> d${mainDice} (**${mainRoll}**), d${subDice} (**${subRoll}**) = **${total}**\n`;
+            resultText += `> Gate ≤ ${gate}\n`;
+            resultText += `> HR = ${highRoll}\n`;
+            resultText += `> HR+${modifier} = **${damage} damage**\n`;
+            resultText += `> \n`;
+            
+            if (isFumble) {
+                resultText += `> **FUMBLE! ⚠️** (Both dice showed 1)`;
+            } else if (isCrit) {
+                resultText += `> **CRITICAL HIT! ✨** (Both dice: ${mainRoll})`;
+            } else if (isHit) {
+                resultText += `> **HIT ✅**`;
+            } else {
+                resultText += `> **MISS ❌**`;
+            }
+
+            const embed = new EmbedBuilder()
+                .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+                .setTitle(`🎲 Attack Roll`)
+                .setDescription(resultText)
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
@@ -708,153 +937,229 @@ client.on('interactionCreate', async interaction => {
             }
 
             await interaction.reply({ embeds: [embed] });
-        } else if (commandName === 'startencounter') {
-            if (activeEncounter.active) {
-                await interaction.reply({ content: 'An encounter is already active! Use `/endencounter` to end it first.', ephemeral: true });
-                return;
+        } else if (commandName === 'clash') {
+            const subcommand = interaction.options.getSubcommand();
+
+            if (subcommand === 'start') {
+                if (activeEncounter.active) {
+                    await interaction.reply({ content: 'A clash is already active! Use `/clash end` to end it first.', ephemeral: true });
+                    return;
+                }
+
+                activeEncounter.active = true;
+                activeEncounter.combatants = [];
+                saveData();
+
+                const embed = new EmbedBuilder()
+                    .setColor(0xFF6B6B)
+                    .setTitle('⚔️ Clash Started!')
+                    .setDescription('Use `/clash add` to add players to this clash.\nUse `/clash list` to view active combatants.')
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+
+            } else if (subcommand === 'end') {
+                if (!activeEncounter.active) {
+                    await interaction.reply({ content: 'No active clash to end.', ephemeral: true });
+                    return;
+                }
+
+                const combatantCount = activeEncounter.combatants.length;
+                activeEncounter.active = false;
+                activeEncounter.combatants = [];
+                saveData();
+
+                const embed = new EmbedBuilder()
+                    .setColor(0x00FF00)
+                    .setTitle('✅ Clash Ended')
+                    .setDescription(`Clash completed with ${combatantCount} combatant(s).`)
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+
+            } else if (subcommand === 'add') {
+                if (!activeEncounter.active) {
+                    await interaction.reply({ content: 'No active clash. Use `/clash start` first.', ephemeral: true });
+                    return;
+                }
+
+                const playersInput = interaction.options.getString('players');
+                let targetPlayers = [];
+                
+                if (playersInput) {
+                    const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
+                    targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
+                } else {
+                    targetPlayers = [interaction.user.id];
+                }
+
+                const added = [];
+                const alreadyIn = [];
+                const noData = [];
+
+                for (const userId of targetPlayers) {
+                    try {
+                        const playerMember = await interaction.guild.members.fetch(userId);
+                        
+                        if (!playerData.has(userId)) {
+                            noData.push(playerMember.displayName);
+                            continue;
+                        }
+
+                        if (activeEncounter.combatants.includes(userId)) {
+                            alreadyIn.push(playerData.get(userId).characterName);
+                            continue;
+                        }
+
+                        activeEncounter.combatants.push(userId);
+                        added.push(playerData.get(userId).characterName);
+                    } catch (error) {
+                        console.error(`Error adding player ${userId}:`, error);
+                    }
+                }
+
+                saveData();
+
+                let description = '';
+                if (added.length > 0) description += `✅ Added: ${added.join(', ')}\n`;
+                if (alreadyIn.length > 0) description += `⚠️ Already in: ${alreadyIn.join(', ')}\n`;
+                if (noData.length > 0) description += `❌ No data: ${noData.join(', ')}`;
+
+                const embed = new EmbedBuilder()
+                    .setColor(0x00FF00)
+                    .setTitle('➕ Players Added to Clash')
+                    .setDescription(description || 'No players added')
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+
+            } else if (subcommand === 'remove') {
+                if (!activeEncounter.active) {
+                    await interaction.reply({ content: 'No active clash.', ephemeral: true });
+                    return;
+                }
+
+                const playersInput = interaction.options.getString('players');
+                if (!playersInput) {
+                    await interaction.reply({ content: 'Please mention at least one player to remove.', ephemeral: true });
+                    return;
+                }
+
+                const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
+                const targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
+
+                const removed = [];
+                const notIn = [];
+
+                for (const userId of targetPlayers) {
+                    const index = activeEncounter.combatants.indexOf(userId);
+                    if (index !== -1) {
+                        activeEncounter.combatants.splice(index, 1);
+                        const data = playerData.get(userId);
+                        removed.push(data ? data.characterName : 'Unknown');
+                    } else {
+                        notIn.push('Player');
+                    }
+                }
+
+                saveData();
+
+                let description = '';
+                if (removed.length > 0) description += `✅ Removed: ${removed.join(', ')}\n`;
+                if (notIn.length > 0) description += `⚠️ Not in clash: ${notIn.length} player(s)`;
+
+                const embed = new EmbedBuilder()
+                    .setColor(0xFF6B6B)
+                    .setTitle('➖ Players Removed from Clash')
+                    .setDescription(description || 'No players removed')
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+
+            } else if (subcommand === 'list') {
+                if (!activeEncounter.active) {
+                    await interaction.reply('No active clash. Use `/clash start` to begin.');
+                    return;
+                }
+
+                if (activeEncounter.combatants.length === 0) {
+                    await interaction.reply('No combatants in the current clash. Use `/clash add` to add players.');
+                    return;
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(0xFFFFFF)
+                    .setTitle('⚔️ Active Clash - Combatants')
+                    .setTimestamp();
+
+                for (const userId of activeEncounter.combatants) {
+                    const data = playerData.get(userId);
+                    if (!data) continue;
+
+                    let valueText = `${RESOURCE_EMOJIS.HP} HP: ${data.HP}/${data.maxHP} | ${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP} | ${RESOURCE_EMOJIS.IP} IP: ${data.IP}/${data.maxIP} | ${RESOURCE_EMOJIS.Armor} Armor: ${data.Armor}/${data.maxArmor} | ${RESOURCE_EMOJIS.Barrier} Barrier: ${data.Barrier}/${data.maxBarrier}`;
+                    
+                    if (data.statusEffects && data.statusEffects.length > 0) {
+                        const statusText = data.statusEffects
+                            .map(s => `${s.name} (${s.duration})`)
+                            .join(', ');
+                        valueText += `\n🔮 ${statusText}`;
+                    }
+
+                    embed.addFields({
+                        name: data.characterName,
+                        value: valueText,
+                        inline: false
+                    });
+                }
+
+                embed.setFooter({ text: `${activeEncounter.combatants.length} combatant(s) in clash` });
+
+                await interaction.reply({ embeds: [embed] });
             }
-
-            activeEncounter.active = true;
-            activeEncounter.combatants = [];
-            saveData();
-
-            const embed = new EmbedBuilder()
-                .setColor(0xFF6B6B)
-                .setTitle('⚔️ Encounter Started!')
-                .setDescription('Use `/addcombatant` to add players to this encounter.\nUse `/listall` to view active combatants.')
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'endencounter') {
-            if (!activeEncounter.active) {
-                await interaction.reply({ content: 'No active encounter to end.', ephemeral: true });
-                return;
-            }
-
-            const combatantCount = activeEncounter.combatants.length;
-            activeEncounter.active = false;
-            activeEncounter.combatants = [];
-            saveData();
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('✅ Encounter Ended')
-                .setDescription(`Encounter completed with ${combatantCount} combatant(s).`)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'addcombatant') {
-            if (!activeEncounter.active) {
-                await interaction.reply({ content: 'No active encounter. Use `/startencounter` first.', ephemeral: true });
-                return;
-            }
-
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = await interaction.guild.members.fetch(player.id);
-
-            if (!playerData.has(player.id)) {
-                await interaction.reply({ content: `${playerMember.displayName} doesn't have character data. Use \`/set\` to create their character first.`, ephemeral: true });
-                return;
-            }
-
-            if (activeEncounter.combatants.includes(player.id)) {
-                await interaction.reply({ content: `${playerData.get(player.id).characterName} is already in the encounter!`, ephemeral: true });
-                return;
-            }
-
-            activeEncounter.combatants.push(player.id);
-            saveData();
-
-            const data = playerData.get(player.id);
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('➕ Combatant Added')
-                .setDescription(`**${data.characterName}** joined the encounter!`)
-                .addFields(
-                    { name: `${RESOURCE_EMOJIS.HP} HP`, value: `${data.HP}/${data.maxHP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.MP} MP`, value: `${data.MP}/${data.maxMP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.IP} IP`, value: `${data.IP}/${data.maxIP}`, inline: true }
-                )
-                .setFooter({ text: `${activeEncounter.combatants.length} combatant(s) in encounter` })
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'removecombatant') {
-            if (!activeEncounter.active) {
-                await interaction.reply({ content: 'No active encounter.', ephemeral: true });
-                return;
-            }
-
-            const player = interaction.options.getUser('player');
-            const index = activeEncounter.combatants.indexOf(player.id);
-
-            if (index === -1) {
-                await interaction.reply({ content: 'That player is not in the encounter.', ephemeral: true });
-                return;
-            }
-
-            activeEncounter.combatants.splice(index, 1);
-            saveData();
-
-            const data = playerData.get(player.id);
-            const characterName = data ? data.characterName : player.username;
-
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000)
-                .setTitle('➖ Combatant Removed')
-                .setDescription(`**${characterName}** left the encounter.`)
-                .setFooter({ text: `${activeEncounter.combatants.length} combatant(s) remaining` })
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'guide') {
             const embed = new EmbedBuilder()
-                .setColor(0x5865F2)
-                .setTitle('📖 Command Guide')
+                .setColor(0x00BFFF)
+                .setTitle('📖 Bot Commands Guide')
+                .setDescription('Complete list of available commands')
                 .addFields(
-                    {
-                        name: '⚙️ /set',
-                        value: 'Set max resources for a player\n' +
-                               '**Usage:** `/set @player name:CharacterName hp:100 mp:50 ip:10 armor:20 barrier:15`',
-                        inline: false
+                    { 
+                        name: '🎮 Setup', 
+                        value: '`/set @player name hp mp ip armor barrier` - Create/update character\n`/delete @player` - Delete character data\n`/view [@player]` - View resources (self if empty)\n`/viewall` - View all players', 
+                        inline: false 
                     },
-                    {
-                        name: '⚔️ Encounter Commands',
-                        value: '`/startencounter` - Start a new encounter (GM only)\n' +
-                               '`/addcombatant` - Add player to encounter: `/addcombatant @player`\n' +
-                               '`/removecombatant` - Remove player from encounter\n' +
-                               '`/endencounter` - End the encounter (GM only)',
-                        inline: false
+                    { 
+                        name: '⚡ Quick Updates', 
+                        value: '`/hp <amount|full|zero>` - Update HP\n`/mp`, `/ip`, `/armor`, `/barrier` - Same for other resources\n`/rest` - Restore HP/MP, reset Armor/Barrier to 0', 
+                        inline: false 
                     },
-                    {
-                        name: '📋 /listall',
-                        value: 'View all combatants in the **active encounter**',
-                        inline: false
+                    { 
+                        name: '💥 Combat', 
+                        value: '`/damage <amount> <armor|barrier> [@players]` - Apply damage (multi-target)\n`/attack <mainDice> <subDice> <modifier> <gate>` - Roll attack with HighRoll system', 
+                        inline: false 
                     },
-                    {
-                        name: '👥 /viewall',
-                        value: 'View **all registered characters** (not just in encounter)',
-                        inline: false
+                    { 
+                        name: '🔮 Status Effects', 
+                        value: '`/status add <name> <duration> [@player]` - Add status\n`/status clear <name> [@player]` - Remove status\n`/tick [@player]` - Advance turn (reduce durations)', 
+                        inline: false 
                     },
-                    {
-                        name: '⚡ Quick Commands',
-                        value: '`/hp`, `/mp`, `/ip`, `/armor`, `/barrier`\n' +
-                               '**Usage:** `/hp -10` to subtract or `/mp full` to restore to max',
-                        inline: false
+                    { 
+                        name: '⚔️ Clash (Encounters)', 
+                        value: '`/clash start` - Start encounter\n`/clash add [@players]` - Add to clash (self if empty)\n`/clash remove @players` - Remove from clash\n`/clash list` - View combatants\n`/clash end` - End encounter', 
+                        inline: false 
                     },
-                    {
-                        name: '✨ Special Actions',
-                        value: '`/rest` - Restore HP/MP to max, reset Armor/Barrier to 0\n' +
-                               '`/status` - Add status effect: `/status name:Poisoned duration:3`\n' +
-                               '`/removestatus` - Remove status: `/removestatus name:Poisoned`\n' +
-                               '`/tick` - Advance your turn (reduce status durations by 1)',
-                        inline: false
+                    { 
+                        name: '🎲 Attack Roll Info', 
+                        value: '**Gate**: Miss if main dice ≤ gate\n**HighRoll (HR)**: Higher of two dice\n**Damage**: HR + modifier\n**Fumble**: Both dice = 1\n**Crit**: Both dice same & >6', 
+                        inline: false 
+                    },
+                    { 
+                        name: '📝 Examples', 
+                        value: '`/damage 15 armor @John @Sarah` - 15 damage to both\n`/attack 10 8 5 2` - d10+d8, +5 mod, gate 2\n`/hp -20` - Lose 20 HP\n`/status add Bleed 3` - Add Bleed for 3 turns', 
+                        inline: false 
                     }
                 )
+                .setFooter({ text: 'Tip: Most commands default to yourself if @player is not specified' })
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
