@@ -1415,7 +1415,7 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     },
                     { 
-                    { 
+                    
                         name: '💥 Combat', 
                         value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
                         inline: false 
