@@ -474,7 +474,15 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('attack')
-        .setDescription('Roll attack dice with damage calculation')
+        .setDescription('Roll attack/cast dice with damage calculation')
+        .addStringOption(option =>
+            option.setName('type')
+                .setDescription('Attack or Cast')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Attack', value: 'attack' },
+                    { name: 'Cast', value: 'cast' }
+                ))
         .addIntegerOption(option =>
             option.setName('maindice')
                 .setDescription('Main dice size (e.g., 10 for d10)')
@@ -490,7 +498,43 @@ const commands = [
         .addIntegerOption(option =>
             option.setName('gate')
                 .setDescription('Gate threshold (miss if main dice ≤ gate)')
-                .setRequired(true)),
+                .setRequired(true))
+        .addUserOption(option =>
+            option.setName('player')
+                .setDescription('Who is making this roll? (leave empty for yourself)')
+                .setRequired(false)),
+
+    new SlashCommandBuilder()
+        .setName('check')
+        .setDescription('Roll a skill check (fails if ANY dice ≤ threshold)')
+        .addIntegerOption(option =>
+            option.setName('dice1')
+                .setDescription('First dice size (e.g., 10 for d10)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('dice2')
+                .setDescription('Second dice size (e.g., 8 for d8)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('threshold')
+                .setDescription('Failure threshold (fail if ANY dice ≤ this)')
+                .setRequired(true))
+        .addUserOption(option =>
+            option.setName('player')
+                .setDescription('Who is making this check? (leave empty for yourself)')
+                .setRequired(false)),
+
+    new SlashCommandBuilder()
+        .setName('ignore')
+        .setDescription('Apply damage that ignores Armor/Barrier (directly to HP)')
+        .addIntegerOption(option =>
+            option.setName('amount')
+                .setDescription('Amount of damage')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('players')
+                .setDescription('Players to damage (mention multiple: @player1 @player2, or leave empty for self)')
+                .setRequired(false)),
 
     new SlashCommandBuilder()
         .setName('clash')
@@ -1024,10 +1068,19 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'attack') {
+            const attackType = interaction.options.getString('type');
             const mainDice = interaction.options.getInteger('maindice');
             const subDice = interaction.options.getInteger('subdice');
             const modifier = interaction.options.getInteger('modifier');
             const gate = interaction.options.getInteger('gate');
+            const player = interaction.options.getUser('player') || interaction.user;
+            const playerMember = player.id === interaction.user.id 
+                ? interaction.member 
+                : await interaction.guild.members.fetch(player.id);
+
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+            const characterName = data.characterName;
 
             // Roll the dice
             const mainRoll = Math.floor(Math.random() * mainDice) + 1;
@@ -1036,33 +1089,139 @@ client.on('interactionCreate', async interaction => {
             const highRoll = Math.max(mainRoll, subRoll);
             const damage = highRoll + modifier;
 
-            // Determine hit/miss
-            const isHit = mainRoll > gate;
+            // Determine hit/miss/fumble/crit
             const isFumble = mainRoll === 1 && subRoll === 1;
             const isCrit = !isFumble && mainRoll === subRoll && mainRoll > 6;
+            const isHit = isFumble ? false : isCrit ? true : mainRoll > gate;
 
-            // Build result text
-            let resultText = `> d${mainDice} (**${mainRoll}**), d${subDice} (**${subRoll}**) = **${total}**\n`;
-            resultText += `> Gate ≤ ${gate}\n`;
-            resultText += `> HR = ${highRoll}\n`;
-            resultText += `> HR+${modifier} = **${damage} damage**\n`;
+            // Build result text with improved formatting
+            const typeIcon = attackType === 'attack' ? '⚔️' : '✨';
+            const typeText = attackType === 'attack' ? 'Attack' : 'Cast';
+            
+            let resultText = `> **${characterName}** ${typeIcon}\n`;
+            resultText += `> \n`;
+            resultText += `> **[d${mainDice}]** rolled **${mainRoll}**  |  d${subDice} rolled ${subRoll}\n`;
+            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+            resultText += `> \n`;
+            resultText += `> HighRoll = **${highRoll}**\n`;
+            resultText += `> HR + ${modifier} = **${damage} damage**\n`;
             resultText += `> \n`;
             
             if (isFumble) {
-                resultText += `> **FUMBLE! ⚠️** (Both dice showed 1)`;
+                resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
             } else if (isCrit) {
-                resultText += `> **CRITICAL HIT! ✨** (Both dice: ${mainRoll})`;
+                resultText += `> ⭐ **CRITICAL ${typeText.toUpperCase()}!** (Auto-Success)`;
             } else if (isHit) {
-                resultText += `> **HIT ✅**`;
+                resultText += `> ✅ **HIT**`;
             } else {
-                resultText += `> **MISS ❌**`;
+                resultText += `> ❌ **MISS**`;
             }
 
             const embed = new EmbedBuilder()
                 .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                .setTitle(`🎲 Attack Roll`)
+                .setTitle(`🎲 ${typeText} Roll`)
                 .setDescription(resultText)
                 .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+
+        } else if (commandName === 'check') {
+            const dice1 = interaction.options.getInteger('dice1');
+            const dice2 = interaction.options.getInteger('dice2');
+            const threshold = interaction.options.getInteger('threshold');
+            const player = interaction.options.getUser('player') || interaction.user;
+            const playerMember = player.id === interaction.user.id 
+                ? interaction.member 
+                : await interaction.guild.members.fetch(player.id);
+
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+            const characterName = data.characterName;
+
+            // Roll the dice
+            const roll1 = Math.floor(Math.random() * dice1) + 1;
+            const roll2 = Math.floor(Math.random() * dice2) + 1;
+            const total = roll1 + roll2;
+
+            // Determine success/fail/fumble/crit
+            const isFumble = roll1 === 1 && roll2 === 1;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 > 6;
+            const isSuccess = isFumble ? false : isCrit ? true : (roll1 > threshold && roll2 > threshold);
+
+            // Build result text
+            let resultText = `> **${characterName}** 🎲\n`;
+            resultText += `> \n`;
+            resultText += `> d${dice1} rolled **${roll1}**  |  d${dice2} rolled **${roll2}**\n`;
+            resultText += `> Total: ${total}  •  Threshold: ≤${threshold}\n`;
+            resultText += `> \n`;
+            
+            if (isFumble) {
+                resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+            } else if (isCrit) {
+                resultText += `> ⭐ **CRITICAL SUCCESS!** (Auto-Success)`;
+            } else if (isSuccess) {
+                resultText += `> ✅ **SUCCESS** (Both dice > ${threshold})`;
+            } else {
+                resultText += `> ❌ **FAIL** (At least one die ≤ ${threshold})`;
+            }
+
+            const embed = new EmbedBuilder()
+                .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isSuccess ? 0x00FF00 : 0xFF0000)
+                .setTitle(`🎲 Skill Check`)
+                .setDescription(resultText)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+
+        } else if (commandName === 'ignore') {
+            const damageAmount = interaction.options.getInteger('amount');
+            const playersInput = interaction.options.getString('players');
+
+            // Parse players from mentions or default to self
+            let targetPlayers = [];
+            if (playersInput) {
+                const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
+                targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
+            } else {
+                targetPlayers = [interaction.user.id];
+            }
+
+            const results = [];
+
+            for (const userId of targetPlayers) {
+                try {
+                    const playerMember = await interaction.guild.members.fetch(userId);
+                    initPlayer(userId, playerMember.displayName);
+                    const data = playerData.get(userId);
+
+                    // Apply damage directly to HP
+                    data.HP -= damageAmount;
+
+                    results.push({
+                        name: data.characterName,
+                        currentHP: data.HP,
+                        maxHP: data.maxHP
+                    });
+                } catch (error) {
+                    console.error(`Error processing player ${userId}:`, error);
+                }
+            }
+
+            saveData();
+
+            const embed = new EmbedBuilder()
+                .setColor(0x8B0000)
+                .setTitle(`⚡ ${damageAmount} True Damage!`)
+                .setDescription(`Ignores all protection`)
+                .setTimestamp();
+
+            for (const result of results) {
+                embed.addFields({
+                    name: `${result.name}`,
+                    value: `${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP}`,
+                    inline: false
+                });
+            }
 
             await interaction.reply({ embeds: [embed] });
 
