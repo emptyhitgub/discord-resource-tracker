@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -515,6 +515,18 @@ const commands = [
             option.setName('player')
                 .setDescription('Who is making this check? (leave empty for yourself)')
                 .setRequired(false)),
+
+    new SlashCommandBuilder()
+        .setName('apply')
+        .setDescription('Apply damage to a player with defense choice')
+        .addIntegerOption(option =>
+            option.setName('damage')
+                .setDescription('Amount of damage to apply')
+                .setRequired(true))
+        .addUserOption(option =>
+            option.setName('target')
+                .setDescription('Player receiving the damage')
+                .setRequired(true)),
 
     new SlashCommandBuilder()
         .setName('clash')
@@ -1149,6 +1161,54 @@ client.on('interactionCreate', async interaction => {
 
             await interaction.reply({ embeds: [embed] });
 
+        } else if (commandName === 'apply') {
+            const damage = interaction.options.getInteger('damage');
+            const target = interaction.options.getUser('target');
+            const attacker = interaction.user;
+            const attackerMember = interaction.member;
+            const targetMember = await interaction.guild.members.fetch(target.id);
+
+            initPlayer(target.id, targetMember.displayName);
+            initPlayer(attacker.id, attackerMember.displayName);
+            
+            const targetData = playerData.get(target.id);
+            const attackerData = playerData.get(attacker.id);
+
+            // Create defense choice buttons
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`defend_armor_${target.id}_${damage}_${attacker.id}`)
+                        .setLabel('🛡️ Use Armor')
+                        .setStyle(ButtonStyle.Primary)
+                        .setDisabled(targetData.Armor <= 0),
+                    new ButtonBuilder()
+                        .setCustomId(`defend_barrier_${target.id}_${damage}_${attacker.id}`)
+                        .setLabel('💎 Use Barrier')
+                        .setStyle(ButtonStyle.Primary)
+                        .setDisabled(targetData.Barrier <= 0),
+                    new ButtonBuilder()
+                        .setCustomId(`defend_none_${target.id}_${damage}_${attacker.id}`)
+                        .setLabel('❌ No Defense')
+                        .setStyle(ButtonStyle.Danger)
+                );
+
+            const embed = new EmbedBuilder()
+                .setColor(0xFF6B6B)
+                .setTitle('⚠️ Incoming Attack!')
+                .setDescription(`**${attackerData.characterName}** is attacking **${targetData.characterName}** for **${damage} damage**!`)
+                .addFields(
+                    { name: 'Your Defenses', value: `🛡️ Armor: ${targetData.Armor}/${targetData.maxArmor}\n💎 Barrier: ${targetData.Barrier}/${targetData.maxBarrier}\n❤️ HP: ${targetData.HP}/${targetData.maxHP}`, inline: false }
+                )
+                .setFooter({ text: `Only ${targetData.characterName} can respond • Expires in 60 seconds` })
+                .setTimestamp();
+
+            await interaction.reply({ 
+                content: `<@${target.id}>`,
+                embeds: [embed], 
+                components: [row] 
+            });
+
         } else if (commandName === 'listall') {
             if (!activeEncounter.active) {
                 await interaction.reply('No active encounter. Use `/startencounter` to begin.');
@@ -1416,7 +1476,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Direct damage\n`/apply <damage> @target` - Interactive damage (target chooses defense)', 
                         inline: false 
                     },
                     { 
@@ -1436,7 +1496,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '📝 Examples', 
-                        value: '`/attack 10 8 5 2 @John` - John rolls d10+d8, +5 mod, gate 2\n`/check 10 6 3` - Roll d10 & d6, fail if either ≤3\n`/damage 15 armor @John @Sarah` - 15 damage to both', 
+                        value: '`/attack 10 8 5 2 @John` - John rolls d10+d8, +5 mod, gate 2\n`/apply 13 @Saruman` - Apply 13 damage, Saruman chooses defense\n`/check 10 6 3` - Roll d10 & d6, fail if either ≤3\n`/damage 15 armor @John @Sarah` - 15 damage to both', 
                         inline: false 
                     }
                 )
@@ -1449,6 +1509,93 @@ client.on('interactionCreate', async interaction => {
         console.error(error);
         await interaction.reply({ content: 'An error occurred while processing the command.', ephemeral: true });
     }
+});
+
+// Handle button interactions for defense choices
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isButton()) return;
+
+    const [action, choice, targetId, damageStr, attackerId] = interaction.customId.split('_');
+    
+    if (action !== 'defend') return;
+
+    // Only the target can click their defense buttons
+    if (interaction.user.id !== targetId) {
+        await interaction.reply({ content: 'This is not your defense choice!', ephemeral: true });
+        return;
+    }
+
+    const damage = parseInt(damageStr);
+    const targetData = playerData.get(targetId);
+    const attackerData = playerData.get(attackerId);
+
+    if (!targetData) {
+        await interaction.update({ content: 'Error: Player data not found.', components: [], embeds: [] });
+        return;
+    }
+
+    let protectionUsed = 0;
+    let hpLost = 0;
+    let defenseType = '';
+    const protectionResource = choice === 'armor' ? 'Armor' : choice === 'barrier' ? 'Barrier' : null;
+
+    if (choice === 'none') {
+        // No defense - all damage to HP
+        hpLost = damage;
+        targetData.HP -= damage;
+        defenseType = 'No Defense';
+    } else {
+        // Use armor or barrier
+        defenseType = protectionResource;
+        let remainingDamage = damage;
+
+        if (targetData[protectionResource] > 0) {
+            if (targetData[protectionResource] >= remainingDamage) {
+                // Protection absorbs all damage
+                protectionUsed = remainingDamage;
+                targetData[protectionResource] -= remainingDamage;
+                remainingDamage = 0;
+            } else {
+                // Protection absorbs some, rest goes to HP
+                protectionUsed = targetData[protectionResource];
+                remainingDamage -= targetData[protectionResource];
+                targetData[protectionResource] = 0;
+            }
+        }
+
+        // Apply remaining damage to HP
+        if (remainingDamage > 0) {
+            hpLost = remainingDamage;
+            targetData.HP -= remainingDamage;
+        }
+    }
+
+    await saveData();
+
+    // Build result embed
+    const resultEmbed = new EmbedBuilder()
+        .setColor(0xFF0000)
+        .setTitle('💥 Damage Applied!')
+        .setDescription(`**${targetData.characterName}** chose: **${defenseType}**`)
+        .setTimestamp();
+
+    if (choice !== 'none' && protectionResource) {
+        resultEmbed.addFields(
+            { name: `${RESOURCE_EMOJIS[protectionResource]} ${protectionResource}`, value: `Absorbed: **${protectionUsed}** damage`, inline: true }
+        );
+    }
+
+    if (hpLost > 0) {
+        resultEmbed.addFields(
+            { name: `${RESOURCE_EMOJIS.HP} HP Damage`, value: `Lost: **${hpLost}** HP`, inline: true }
+        );
+    }
+
+    resultEmbed.addFields(
+        { name: 'Current Status', value: `${RESOURCE_EMOJIS.HP} HP: ${targetData.HP}/${targetData.maxHP}\n${RESOURCE_EMOJIS.Armor} Armor: ${targetData.Armor}/${targetData.maxArmor}\n${RESOURCE_EMOJIS.Barrier} Barrier: ${targetData.Barrier}/${targetData.maxBarrier}`, inline: false }
+    );
+
+    await interaction.update({ embeds: [resultEmbed], components: [] });
 });
 
 // Login to Discord
