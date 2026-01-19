@@ -1070,7 +1070,7 @@ client.on('interactionCreate', async interaction => {
 
             // Determine hit/miss/fumble/crit
             const isFumble = roll1 === 1 && roll2 === 1;
-            const isCrit = !isFumble && roll1 === roll2 && roll1 > 6;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
             const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
 
             // Build result text
@@ -1121,7 +1121,7 @@ client.on('interactionCreate', async interaction => {
 
             // Determine success/fail/fumble/crit
             const isFumble = roll1 === 1 && roll2 === 1;
-            const isCrit = !isFumble && roll1 === roll2 && roll1 > 6;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
             const isSuccess = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
 
             // Build result text
@@ -1421,7 +1421,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '🎲 Dice Rolls', 
-                        value: '`/attack <d1> <d2> <mod> <gate> [@player]` - Attack/Cast roll\n• Fail if ANY die ≤ gate\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Same rules as attack', 
+                        value: '`/attack <d1> <d2> <mod> <gate> [@player]` - Attack/Cast roll\n• Fail if ANY die ≤ gate\n• Fumble (1,1) = Auto-Fail\n• Crit (same, ≥6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Same rules as attack', 
                         inline: false 
                     },
                     { 
