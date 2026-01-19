@@ -476,12 +476,12 @@ const commands = [
         .setName('attack')
         .setDescription('Roll attack/cast dice with damage calculation')
         .addIntegerOption(option =>
-            option.setName('maindice')
-                .setDescription('Main dice size (e.g., 10 for d10)')
+            option.setName('dice1')
+                .setDescription('First dice size (e.g., 10 for d10)')
                 .setRequired(true))
         .addIntegerOption(option =>
-            option.setName('subdice')
-                .setDescription('Sub dice size (e.g., 8 for d8)')
+            option.setName('dice2')
+                .setDescription('Second dice size (e.g., 8 for d8)')
                 .setRequired(true))
         .addIntegerOption(option =>
             option.setName('modifier')
@@ -489,7 +489,7 @@ const commands = [
                 .setRequired(true))
         .addIntegerOption(option =>
             option.setName('gate')
-                .setDescription('Gate threshold (miss if main dice ≤ gate)')
+                .setDescription('Gate threshold (fail if ANY dice ≤ gate)')
                 .setRequired(true))
         .addUserOption(option =>
             option.setName('player')
@@ -1048,8 +1048,8 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'attack') {
-            const mainDice = interaction.options.getInteger('maindice');
-            const subDice = interaction.options.getInteger('subdice');
+            const dice1 = interaction.options.getInteger('dice1');
+            const dice2 = interaction.options.getInteger('dice2');
             const modifier = interaction.options.getInteger('modifier');
             const gate = interaction.options.getInteger('gate');
             const player = interaction.options.getUser('player') || interaction.user;
@@ -1062,21 +1062,21 @@ client.on('interactionCreate', async interaction => {
             const characterName = data.characterName;
 
             // Roll the dice
-            const mainRoll = Math.floor(Math.random() * mainDice) + 1;
-            const subRoll = Math.floor(Math.random() * subDice) + 1;
-            const total = mainRoll + subRoll;
-            const highRoll = Math.max(mainRoll, subRoll);
+            const roll1 = Math.floor(Math.random() * dice1) + 1;
+            const roll2 = Math.floor(Math.random() * dice2) + 1;
+            const total = roll1 + roll2;
+            const highRoll = Math.max(roll1, roll2);
             const damage = highRoll + modifier;
 
             // Determine hit/miss/fumble/crit
-            const isFumble = mainRoll === 1 && subRoll === 1;
-            const isCrit = !isFumble && mainRoll === subRoll && mainRoll > 6;
-            const isHit = isFumble ? false : isCrit ? true : mainRoll > gate;
+            const isFumble = roll1 === 1 && roll2 === 1;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 > 6;
+            const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
 
-            // Build result text with improved formatting
+            // Build result text
             let resultText = `> **${characterName}** ⚔️/✨\n`;
             resultText += `> \n`;
-            resultText += `> **[d${mainDice}: ${mainRoll}]**  |  d${subDice}: ${subRoll}\n`;
+            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
             resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
             resultText += `> \n`;
             resultText += `> HighRoll = **${highRoll}**\n`;
@@ -1088,9 +1088,9 @@ client.on('interactionCreate', async interaction => {
             } else if (isCrit) {
                 resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
             } else if (isHit) {
-                resultText += `> ✅ **HIT**`;
+                resultText += `> ✅ **HIT** (Both dice > ${gate})`;
             } else {
-                resultText += `> ❌ **MISS**`;
+                resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
             }
 
             const embed = new EmbedBuilder()
@@ -1404,6 +1404,7 @@ client.on('interactionCreate', async interaction => {
                 .setTitle('📖 Bot Commands Guide')
                 .setDescription('Complete list of available commands')
                 .addFields(
+                .addFields(
                     { 
                         name: '🎮 Setup', 
                         value: '`/set @player name hp mp ip armor barrier` - Create/update character\n`/delete @player` - Delete character data\n`/view [@player]` - View resources (self if empty)\n`/viewall` - View all players', 
@@ -1415,49 +1416,28 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     },
                     { 
-                    
                         name: '💥 Combat', 
                         value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
                         inline: false 
                     },
                     { 
                         name: '🎲 Dice Rolls', 
-                        value: '`/attack <mainD> <subD> <mod> <gate> [@player]` - Attack/Cast roll\n• Main dice > gate = HIT\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Fail if ANY die ≤ gate\n• Fumble/Crit same rules',
-                    { 
-                        name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
+                        value: '`/attack <d1> <d2> <mod> <gate> [@player]` - Attack/Cast roll\n• Fail if ANY die ≤ gate\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Same rules as attack', 
                         inline: false 
-                    },
-                    { 
-                        name: '🎲 Dice Rolls', 
-                        value: '`/attack <mainD> <subD> <mod> <gate> [@player]` - Attack/Cast roll\n• Main dice > gate = HIT\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Fail if ANY die ≤ gate\n• Fumble/Crit same rules',
-                    { 
-                        name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
-                        inline: false 
-                    },
-                    { 
-                        name: '🎲 Dice Rolls', 
-                        value: '`/attack <mainD> <subD> <mod> <gate> [@player]` - Attack/Cast roll\n• Main dice > gate = HIT\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Fail if ANY die ≤ gate\n• Fumble/Crit same rules',
                     },
                     { 
                         name: '🔮 Status Effects', 
-                        value: '`/status add <name> <duration> [@player]` - Add status\n`/status clear <name> [@player]` - Remove status\n`/tick [@player]` - Advance turn (reduce durations)', 
+                        value: '`/status add <n> <duration> [@player]` - Add status\n`/status clear <n> [@player]` - Remove status\n`/tick [@player]` - Advance turn (reduce durations)', 
                         inline: false 
                     },
                     { 
                         name: '⚔️ Clash (Encounters)', 
-                        value: '`/clash start` - Start encounter\n`/clash add [@players]` - Add to clash (self if empty)\n`/clash remove @players` - Remove from clash\n`/clash list` - View combatants\n`/clash end` - End encounter', 
-                        inline: false 
-                    },
-                    { 
-                        name: '🎲 Attack Roll Info', 
-                        value: '**Gate**: Miss if main dice ≤ gate\n**HighRoll (HR)**: Higher of two dice\n**Damage**: HR + modifier\n**Fumble**: Both dice = 1\n**Crit**: Both dice same & >6', 
+                        value: '`/clash start` - Start encounter\n`/clash add [@players]` - Add to clash\n`/clash remove @players` - Remove from clash\n`/clash list` - View combatants\n`/clash end` - End encounter', 
                         inline: false 
                     },
                     { 
                         name: '📝 Examples', 
-                        value: '`/damage 15 armor @John @Sarah` - 15 damage to both\n`/attack 10 8 5 2` - d10+d8, +5 mod, gate 2\n`/hp -20` - Lose 20 HP\n`/status add Bleed 3` - Add Bleed for 3 turns', 
+                        value: '`/attack 10 8 5 2 @John` - John rolls d10+d8, +5 mod, gate 2\n`/check 10 6 3` - Roll d10 & d6, fail if either ≤3\n`/damage 15 armor @John @Sarah` - 15 damage to both', 
                         inline: false 
                     }
                 )
