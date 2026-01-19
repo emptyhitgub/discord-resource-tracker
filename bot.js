@@ -464,8 +464,8 @@ const commands = [
                 .setDescription('Type of protection to use first')
                 .setRequired(true)
                 .addChoices(
-                    { name: 'Armor', value: 'armor' },
-                    { name: 'Barrier', value: 'barrier' }
+                    { name: 'armor', value: 'armor' },
+                    { name: 'barrier', value: 'barrier' }
                 ))
         .addStringOption(option =>
             option.setName('players')
@@ -475,14 +475,6 @@ const commands = [
     new SlashCommandBuilder()
         .setName('attack')
         .setDescription('Roll attack/cast dice with damage calculation')
-        .addStringOption(option =>
-            option.setName('type')
-                .setDescription('Attack or Cast')
-                .setRequired(true)
-                .addChoices(
-                    { name: 'Attack', value: 'attack' },
-                    { name: 'Cast', value: 'cast' }
-                ))
         .addIntegerOption(option =>
             option.setName('maindice')
                 .setDescription('Main dice size (e.g., 10 for d10)')
@@ -506,7 +498,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('check')
-        .setDescription('Roll a skill check (fails if ANY dice ≤ threshold)')
+        .setDescription('Roll a skill check (fails if ANY dice ≤ gate)')
         .addIntegerOption(option =>
             option.setName('dice1')
                 .setDescription('First dice size (e.g., 10 for d10)')
@@ -516,24 +508,12 @@ const commands = [
                 .setDescription('Second dice size (e.g., 8 for d8)')
                 .setRequired(true))
         .addIntegerOption(option =>
-            option.setName('threshold')
-                .setDescription('Failure threshold (fail if ANY dice ≤ this)')
+            option.setName('gate')
+                .setDescription('Gate threshold (fail if ANY dice ≤ gate)')
                 .setRequired(true))
         .addUserOption(option =>
             option.setName('player')
                 .setDescription('Who is making this check? (leave empty for yourself)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('ignore')
-        .setDescription('Apply damage that ignores Armor/Barrier (directly to HP)')
-        .addIntegerOption(option =>
-            option.setName('amount')
-                .setDescription('Amount of damage')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('players')
-                .setDescription('Players to damage (mention multiple: @player1 @player2, or leave empty for self)')
                 .setRequired(false)),
 
     new SlashCommandBuilder()
@@ -1068,7 +1048,6 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'attack') {
-            const attackType = interaction.options.getString('type');
             const mainDice = interaction.options.getInteger('maindice');
             const subDice = interaction.options.getInteger('subdice');
             const modifier = interaction.options.getInteger('modifier');
@@ -1095,12 +1074,9 @@ client.on('interactionCreate', async interaction => {
             const isHit = isFumble ? false : isCrit ? true : mainRoll > gate;
 
             // Build result text with improved formatting
-            const typeIcon = attackType === 'attack' ? '⚔️' : '✨';
-            const typeText = attackType === 'attack' ? 'Attack' : 'Cast';
-            
-            let resultText = `> **${characterName}** ${typeIcon}\n`;
+            let resultText = `> **${characterName}** ⚔️/✨\n`;
             resultText += `> \n`;
-            resultText += `> **[d${mainDice}]** rolled **${mainRoll}**  |  d${subDice} rolled ${subRoll}\n`;
+            resultText += `> **[d${mainDice}: ${mainRoll}]**  |  d${subDice}: ${subRoll}\n`;
             resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
             resultText += `> \n`;
             resultText += `> HighRoll = **${highRoll}**\n`;
@@ -1110,7 +1086,7 @@ client.on('interactionCreate', async interaction => {
             if (isFumble) {
                 resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
             } else if (isCrit) {
-                resultText += `> ⭐ **CRITICAL ${typeText.toUpperCase()}!** (Auto-Success)`;
+                resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
             } else if (isHit) {
                 resultText += `> ✅ **HIT**`;
             } else {
@@ -1119,7 +1095,7 @@ client.on('interactionCreate', async interaction => {
 
             const embed = new EmbedBuilder()
                 .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                .setTitle(`🎲 ${typeText} Roll`)
+                .setTitle(`🎲 Attack/Cast Roll`)
                 .setDescription(resultText)
                 .setTimestamp();
 
@@ -1128,7 +1104,7 @@ client.on('interactionCreate', async interaction => {
         } else if (commandName === 'check') {
             const dice1 = interaction.options.getInteger('dice1');
             const dice2 = interaction.options.getInteger('dice2');
-            const threshold = interaction.options.getInteger('threshold');
+            const gate = interaction.options.getInteger('gate');
             const player = interaction.options.getUser('player') || interaction.user;
             const playerMember = player.id === interaction.user.id 
                 ? interaction.member 
@@ -1146,13 +1122,13 @@ client.on('interactionCreate', async interaction => {
             // Determine success/fail/fumble/crit
             const isFumble = roll1 === 1 && roll2 === 1;
             const isCrit = !isFumble && roll1 === roll2 && roll1 > 6;
-            const isSuccess = isFumble ? false : isCrit ? true : (roll1 > threshold && roll2 > threshold);
+            const isSuccess = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
 
             // Build result text
             let resultText = `> **${characterName}** 🎲\n`;
             resultText += `> \n`;
-            resultText += `> d${dice1} rolled **${roll1}**  |  d${dice2} rolled **${roll2}**\n`;
-            resultText += `> Total: ${total}  •  Threshold: ≤${threshold}\n`;
+            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
+            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
             resultText += `> \n`;
             
             if (isFumble) {
@@ -1160,9 +1136,9 @@ client.on('interactionCreate', async interaction => {
             } else if (isCrit) {
                 resultText += `> ⭐ **CRITICAL SUCCESS!** (Auto-Success)`;
             } else if (isSuccess) {
-                resultText += `> ✅ **SUCCESS** (Both dice > ${threshold})`;
+                resultText += `> ✅ **SUCCESS** (Both dice > ${gate})`;
             } else {
-                resultText += `> ❌ **FAIL** (At least one die ≤ ${threshold})`;
+                resultText += `> ❌ **FAIL** (At least one die ≤ ${gate})`;
             }
 
             const embed = new EmbedBuilder()
@@ -1170,58 +1146,6 @@ client.on('interactionCreate', async interaction => {
                 .setTitle(`🎲 Skill Check`)
                 .setDescription(resultText)
                 .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'ignore') {
-            const damageAmount = interaction.options.getInteger('amount');
-            const playersInput = interaction.options.getString('players');
-
-            // Parse players from mentions or default to self
-            let targetPlayers = [];
-            if (playersInput) {
-                const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
-                targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
-            } else {
-                targetPlayers = [interaction.user.id];
-            }
-
-            const results = [];
-
-            for (const userId of targetPlayers) {
-                try {
-                    const playerMember = await interaction.guild.members.fetch(userId);
-                    initPlayer(userId, playerMember.displayName);
-                    const data = playerData.get(userId);
-
-                    // Apply damage directly to HP
-                    data.HP -= damageAmount;
-
-                    results.push({
-                        name: data.characterName,
-                        currentHP: data.HP,
-                        maxHP: data.maxHP
-                    });
-                } catch (error) {
-                    console.error(`Error processing player ${userId}:`, error);
-                }
-            }
-
-            saveData();
-
-            const embed = new EmbedBuilder()
-                .setColor(0x8B0000)
-                .setTitle(`⚡ ${damageAmount} True Damage!`)
-                .setDescription(`Ignores all protection`)
-                .setTimestamp();
-
-            for (const result of results) {
-                embed.addFields({
-                    name: `${result.name}`,
-                    value: `${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP}`,
-                    inline: false
-                });
-            }
 
             await interaction.reply({ embeds: [embed] });
 
@@ -1491,9 +1415,30 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     },
                     { 
+                    { 
                         name: '💥 Combat', 
-                        value: '`/damage <amount> <armor|barrier> [@players]` - Apply damage (multi-target)\n`/attack <mainDice> <subDice> <modifier> <gate>` - Roll attack with HighRoll system', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
                         inline: false 
+                    },
+                    { 
+                        name: '🎲 Dice Rolls', 
+                        value: '`/attack <mainD> <subD> <mod> <gate> [@player]` - Attack/Cast roll\n• Main dice > gate = HIT\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Fail if ANY die ≤ gate\n• Fumble/Crit same rules',
+                    { 
+                        name: '💥 Combat', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
+                        inline: false 
+                    },
+                    { 
+                        name: '🎲 Dice Rolls', 
+                        value: '`/attack <mainD> <subD> <mod> <gate> [@player]` - Attack/Cast roll\n• Main dice > gate = HIT\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Fail if ANY die ≤ gate\n• Fumble/Crit same rules',
+                    { 
+                        name: '💥 Combat', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage (multi-target)', 
+                        inline: false 
+                    },
+                    { 
+                        name: '🎲 Dice Rolls', 
+                        value: '`/attack <mainD> <subD> <mod> <gate> [@player]` - Attack/Cast roll\n• Main dice > gate = HIT\n• Fumble (1,1) = Auto-Fail\n• Crit (same, >6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Fail if ANY die ≤ gate\n• Fumble/Crit same rules',
                     },
                     { 
                         name: '🔮 Status Effects', 
