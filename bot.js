@@ -1404,7 +1404,6 @@ client.on('interactionCreate', async interaction => {
                 .setTitle('📖 Bot Commands Guide')
                 .setDescription('Complete list of available commands')
                 .addFields(
-                .addFields(
                     { 
                         name: '🎮 Setup', 
                         value: '`/set @player name hp mp ip armor barrier` - Create/update character\n`/delete @player` - Delete character data\n`/view [@player]` - View resources (self if empty)\n`/viewall` - View all players', 
