@@ -1,21 +1,17 @@
 {
   "name": "discord-resource-tracker-bot",
-  "version": "1.0.0",
-  "description": "A Discord bot to track player resources for game playtesting",
+  "version": "2.0.0",
+  "description": "A Discord bot to track player resources for game playtesting with PostgreSQL support",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
-  "keywords": [
-    "discord",
-    "bot",
-    "game",
-    "resources"
-  ],
+  "keywords": ["discord", "bot", "game", "resources", "postgresql"],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "dotenv": "^17.2.3"
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.0.3",
+    "pg": "^8.11.3"
   }
 }

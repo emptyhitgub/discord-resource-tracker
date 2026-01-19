@@ -4,12 +4,31 @@ const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits } = require
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const { Pool } = require('pg');
 
 // Bot configuration
-const TOKEN = process.env.DISCORD_BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE'; // Use environment variable
+const TOKEN = process.env.DISCORD_BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID || '927071447300571137';
+const DATABASE_URL = process.env.DATABASE_URL;
 
-// File path for persistent storage
+// PostgreSQL connection pool (only if DATABASE_URL exists)
+let pool = null;
+let useDatabase = false;
+
+if (DATABASE_URL) {
+    pool = new Pool({
+        connectionString: DATABASE_URL,
+        ssl: {
+            rejectUnauthorized: false
+        }
+    });
+    useDatabase = true;
+    console.log('✅ Using PostgreSQL database for storage');
+} else {
+    console.log('⚠️ No DATABASE_URL found, using JSON file storage');
+}
+
+// File path for persistent storage (fallback)
 const DATA_FILE = path.join(__dirname, 'playerData.json');
 
 // In-memory storage for player resources
@@ -33,36 +52,198 @@ const RESOURCE_EMOJIS = {
     Barrier: '🛡️'
 };
 
-// Load data from file
-function loadData() {
+// Initialize database tables
+async function initDatabase() {
+    if (!useDatabase) return;
+
     try {
-        if (fs.existsSync(DATA_FILE)) {
-            const rawData = fs.readFileSync(DATA_FILE, 'utf8');
-            const parsed = JSON.parse(rawData);
-            playerData = new Map(Object.entries(parsed.players || parsed));
-            activeEncounter = parsed.encounter || { active: false, combatants: [] };
-            console.log(`Loaded data for ${playerData.size} players from ${DATA_FILE}`);
-        } else {
-            console.log('No existing data file found. Starting fresh.');
-        }
+        // Create players table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS players (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                character_name TEXT NOT NULL,
+                hp INTEGER DEFAULT 0,
+                mp INTEGER DEFAULT 0,
+                ip INTEGER DEFAULT 0,
+                armor INTEGER DEFAULT 0,
+                barrier INTEGER DEFAULT 0,
+                max_hp INTEGER DEFAULT 0,
+                max_mp INTEGER DEFAULT 0,
+                max_ip INTEGER DEFAULT 0,
+                max_armor INTEGER DEFAULT 0,
+                max_barrier INTEGER DEFAULT 0,
+                status_effects JSONB DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Create encounters table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS encounters (
+                id SERIAL PRIMARY KEY,
+                active BOOLEAN DEFAULT false,
+                combatants JSONB DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Ensure there's at least one encounter row
+        await pool.query(`
+            INSERT INTO encounters (id, active, combatants)
+            VALUES (1, false, '[]'::jsonb)
+            ON CONFLICT DO NOTHING
+        `);
+
+        console.log('✅ Database tables initialized');
     } catch (error) {
-        console.error('Error loading data:', error);
-        console.log('Starting with empty data.');
+        console.error('❌ Error initializing database:', error);
     }
 }
 
-// Save data to file
-function saveData() {
-    try {
-        const dataObject = {
-            players: Object.fromEntries(playerData),
-            encounter: activeEncounter
-        };
-        fs.writeFileSync(DATA_FILE, JSON.stringify(dataObject, null, 2), 'utf8');
-        console.log(`Data saved for ${playerData.size} players`);
-    } catch (error) {
-        console.error('Error saving data:', error);
+// Load data from database or file
+async function loadData() {
+    if (useDatabase) {
+        try {
+            // Load players
+            const playersResult = await pool.query('SELECT * FROM players');
+            playerData.clear();
+            
+            for (const row of playersResult.rows) {
+                playerData.set(row.user_id, {
+                    username: row.username,
+                    characterName: row.character_name,
+                    HP: row.hp,
+                    MP: row.mp,
+                    IP: row.ip,
+                    Armor: row.armor,
+                    Barrier: row.barrier,
+                    maxHP: row.max_hp,
+                    maxMP: row.max_mp,
+                    maxIP: row.max_ip,
+                    maxArmor: row.max_armor,
+                    maxBarrier: row.max_barrier,
+                    statusEffects: row.status_effects || []
+                });
+            }
+
+            // Load encounter
+            const encounterResult = await pool.query('SELECT * FROM encounters WHERE id = 1');
+            if (encounterResult.rows.length > 0) {
+                activeEncounter = {
+                    active: encounterResult.rows[0].active,
+                    combatants: encounterResult.rows[0].combatants || []
+                };
+            }
+
+            console.log(`✅ Loaded ${playerData.size} players from database`);
+        } catch (error) {
+            console.error('❌ Error loading from database:', error);
+        }
+    } else {
+        // Fallback to JSON file
+        try {
+            if (fs.existsSync(DATA_FILE)) {
+                const rawData = fs.readFileSync(DATA_FILE, 'utf8');
+                const parsed = JSON.parse(rawData);
+                playerData = new Map(Object.entries(parsed.players || parsed));
+                activeEncounter = parsed.encounter || { active: false, combatants: [] };
+                console.log(`Loaded data for ${playerData.size} players from ${DATA_FILE}`);
+            } else {
+                console.log('No existing data file found. Starting fresh.');
+            }
+        } catch (error) {
+            console.error('Error loading data:', error);
+            console.log('Starting with empty data.');
+        }
     }
+}
+
+// Save data to database or file
+async function saveData() {
+    if (useDatabase) {
+        try {
+            // Save all players
+            for (const [userId, data] of playerData) {
+                await pool.query(`
+                    INSERT INTO players (
+                        user_id, username, character_name,
+                        hp, mp, ip, armor, barrier,
+                        max_hp, max_mp, max_ip, max_armor, max_barrier,
+                        status_effects, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET
+                        username = $2,
+                        character_name = $3,
+                        hp = $4,
+                        mp = $5,
+                        ip = $6,
+                        armor = $7,
+                        barrier = $8,
+                        max_hp = $9,
+                        max_mp = $10,
+                        max_ip = $11,
+                        max_armor = $12,
+                        max_barrier = $13,
+                        status_effects = $14,
+                        updated_at = CURRENT_TIMESTAMP
+                `, [
+                    userId,
+                    data.username,
+                    data.characterName,
+                    data.HP,
+                    data.MP,
+                    data.IP,
+                    data.Armor,
+                    data.Barrier,
+                    data.maxHP,
+                    data.maxMP,
+                    data.maxIP,
+                    data.maxArmor,
+                    data.maxBarrier,
+                    JSON.stringify(data.statusEffects || [])
+                ]);
+            }
+
+            // Save encounter
+            await pool.query(`
+                UPDATE encounters 
+                SET active = $1, combatants = $2, updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            `, [activeEncounter.active, JSON.stringify(activeEncounter.combatants)]);
+
+            console.log(`✅ Saved ${playerData.size} players to database`);
+        } catch (error) {
+            console.error('❌ Error saving to database:', error);
+        }
+    } else {
+        // Fallback to JSON file
+        try {
+            const dataObject = {
+                players: Object.fromEntries(playerData),
+                encounter: activeEncounter
+            };
+            fs.writeFileSync(DATA_FILE, JSON.stringify(dataObject, null, 2), 'utf8');
+            console.log(`Data saved for ${playerData.size} players`);
+        } catch (error) {
+            console.error('Error saving data:', error);
+        }
+    }
+}
+
+// Delete player from database
+async function deletePlayer(userId) {
+    if (useDatabase) {
+        try {
+            await pool.query('DELETE FROM players WHERE user_id = $1', [userId]);
+            console.log(`✅ Deleted player ${userId} from database`);
+        } catch (error) {
+            console.error('❌ Error deleting player from database:', error);
+        }
+    }
+    // Also delete from memory
+    playerData.delete(userId);
 }
 
 // Initialize player data
@@ -365,10 +546,17 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 })();
 
 // Bot ready event
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     console.log('Resource Tracker Bot is online!');
-    loadData(); // Load saved data when bot starts
+    
+    // Initialize database if using PostgreSQL
+    if (useDatabase) {
+        await initDatabase();
+    }
+    
+    // Load existing data
+    await loadData();
 });
 
 // Handle slash commands
@@ -715,12 +903,23 @@ client.on('interactionCreate', async interaction => {
 
         } else if (commandName === 'reset') {
             playerData.clear();
-            saveData(); // Save after clearing
+            
+            // Clear database if using PostgreSQL
+            if (useDatabase) {
+                try {
+                    await pool.query('DELETE FROM players');
+                    console.log('✅ Cleared all players from database');
+                } catch (error) {
+                    console.error('❌ Error clearing database:', error);
+                }
+            }
+            
+            await saveData();
             
             const embed = new EmbedBuilder()
                 .setColor(0xFF0000)
                 .setTitle('⚠️ All Player Data Reset')
-                .setDescription('All player resources have been cleared and file deleted.')
+                .setDescription('All player resources have been cleared.')
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
@@ -734,8 +933,7 @@ client.on('interactionCreate', async interaction => {
             }
 
             const characterName = playerData.get(player.id).characterName;
-            playerData.delete(player.id);
-            saveData();
+            await deletePlayer(player.id);
 
             const embed = new EmbedBuilder()
                 .setColor(0xFF0000)
