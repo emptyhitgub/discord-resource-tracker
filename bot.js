@@ -1734,41 +1734,46 @@ client.on('interactionCreate', async interaction => {
                 .addFields(
                     { 
                         name: '🎮 Setup', 
-                        value: '`/set @player name hp mp ip armor barrier` - Create/update character\n`/delete @player` - Delete character data\n`/view [@player]` - View resources (self if empty)\n`/viewall` - View all players', 
+                        value: '`/set @player name hp mp ip armor barrier` - Create/update (refills Armor/Barrier)\n`/delete @player` - Delete character data\n`/view [@player]` - View resources\n`/viewall` - View all players', 
                         inline: false 
                     },
                     { 
                         name: '⚡ Quick Updates', 
-                        value: '`/hp <amount|full|zero>` - Update HP\n`/mp`, `/ip`, `/armor`, `/barrier` - Same for other resources\n`/rest` - Restore HP/MP, reset Armor/Barrier to 0', 
+                        value: '`/hp <amount|full|zero>` - Update HP\n`/mp`, `/ip`, `/armor`, `/barrier` - Same for other resources\n`/rest` - Restore HP/MP/Armor/Barrier to full', 
                         inline: false 
                     },
                     { 
                         name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/turn` - New round! Refills Armor/Barrier, resets penalties (GM)', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/turn` - New round! Refills Armor/Barrier, resets penalties (GM only)', 
                         inline: false 
                     },
                     { 
-                        name: '🎲 Dice Rolls', 
-                        value: '`/attack <d1> <d2> <mod> [penalty]` - Attack roll (gate always 1)\n• 2nd+ attack: Choose penalty prompt\n• Optional manual penalty\n\n`/cast <d1> <d2> <mod> [penalty]` - Cast roll\n• 2nd cast: +10 MP\n• 3rd+ cast: +20 MP\n\n`/check <d1> <d2> <gate> [@player]` - Skill check', 
+                        name: '🎲 Attack/Cast System', 
+                        value: '`/attack <d1> <d2> <mod> [penalty]` - Attack roll\n• Gate starts at 1\n• 2nd+ attack: Choose penalty (cumulative)\n• Penalties: Gate +1, -50% Mod, No Mod, Blind (Gate 3)\n• Fumble (1,1) = Auto-Fail | Crit (same, ≥6) = Auto-Success\n\n`/cast <d1> <d2> <mod> [penalty]` - Cast roll\n• 2nd cast: Extra 10 MP | 3rd+: Extra 20 MP\n• No automatic penalty prompts\n• Same crit/fumble rules', 
                         inline: false 
                     },
                     { 
-                        name: '🔮 Status Effects', 
-                        value: '`/status add <n> <duration> [@player]` - Add status\n`/status clear <n> [@player]` - Remove status\n`/tick [@player]` - Advance turn (reduce durations)', 
+                        name: '🎯 Penalty Details', 
+                        value: '**Gate +1**: Increases gate by 1 (stackable)\n**-50% Modifier**: Reduces modifier by 50% (stackable)\n**No Modifier**: Sets modifier to 0\n**Blind**: Sets gate to 3 (max, once only)\n\nPenalties are **cumulative** and persist until `/turn` or `/resetpenalty`', 
+                        inline: false 
+                    },
+                    { 
+                        name: '🔮 Status & Checks', 
+                        value: '`/status add <n> <duration> [@player]` - Add status\n`/status clear <n> [@player]` - Remove status\n`/tick [@player]` - Advance turn\n`/check <d1> <d2> <gate> [@player]` - Skill check', 
                         inline: false 
                     },
                     { 
                         name: '⚔️ Clash & GM Tools', 
-                        value: '`/clash start|end|add|remove|list` - Manage encounters\n`/resetpenalty <attack|cast> @player` - Reset penalties (GM)\n`/turn` - New round (GM)', 
+                        value: '`/clash start|end|add|remove|list` - Manage encounters\n`/resetpenalty <attack|cast> @player` - Reset penalties (GM)\n`/turn` - New round (GM only)', 
                         inline: false 
                     },
                     { 
                         name: '📝 Examples', 
-                        value: '`/attack 10 8 5` - 1st attack, no penalty\n`/attack 10 8 5` - 2nd attack, choose penalty\n`/cast 10 8 5` - Cast with MP penalty\n`/resetpenalty attack @John` - Reset John\'s attacks', 
+                        value: '`/attack 10 8 5` - 1st attack\n`/attack 10 8 5` - 2nd: Choose Gate +1 → Gate ≤2\n`/attack 10 8 5` - 3rd: Choose -50% Mod → Gate ≤2, Mod halved\n`/attack 10 8 5 blind` - Manual blind penalty', 
                         inline: false 
                     }
                 )
-                .setFooter({ text: 'Tip: Most commands default to yourself if @player is not specified' })
+                .setFooter({ text: 'Penalties stack! Gate +1 twice = Gate ≤3 | Two -50% = No modifier' })
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
