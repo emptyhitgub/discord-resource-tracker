@@ -40,6 +40,10 @@ let activeEncounter = {
     combatants: [] // Array of userIds
 };
 
+// Attack and Cast counters (resets on /turn)
+let attackCounters = new Map(); // userId -> count
+let castCounters = new Map(); // userId -> count
+
 // Resource types
 const RESOURCES = ['HP', 'MP', 'IP', 'Armor', 'Barrier'];
 
@@ -474,7 +478,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('attack')
-        .setDescription('Roll attack/cast dice with damage calculation')
+        .setDescription('Roll attack dice with damage calculation')
         .addIntegerOption(option =>
             option.setName('dice1')
                 .setDescription('First dice size (e.g., 10 for d10)')
@@ -487,14 +491,40 @@ const commands = [
             option.setName('modifier')
                 .setDescription('Damage modifier (added to HighRoll)')
                 .setRequired(true))
+        .addStringOption(option =>
+            option.setName('penalties')
+                .setDescription('Optional: Apply penalties manually (e.g., "gate" or "damage")')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Gate +1', value: 'gate' },
+                    { name: 'Damage -50%', value: 'damage50' },
+                    { name: 'Damage -100%', value: 'damage100' }
+                )),
+
+    new SlashCommandBuilder()
+        .setName('cast')
+        .setDescription('Roll cast dice with damage calculation (MP penalty on 2nd+ cast)')
         .addIntegerOption(option =>
-            option.setName('gate')
-                .setDescription('Gate threshold (fail if ANY dice ≤ gate)')
+            option.setName('dice1')
+                .setDescription('First dice size (e.g., 10 for d10)')
                 .setRequired(true))
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('Who is making this roll? (leave empty for yourself)')
-                .setRequired(false)),
+        .addIntegerOption(option =>
+            option.setName('dice2')
+                .setDescription('Second dice size (e.g., 8 for d8)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('modifier')
+                .setDescription('Damage modifier (added to HighRoll)')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('penalties')
+                .setDescription('Optional: Apply penalties manually')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Gate +1', value: 'gate' },
+                    { name: 'Damage -50%', value: 'damage50' },
+                    { name: 'Damage -100%', value: 'damage100' }
+                )),
 
     new SlashCommandBuilder()
         .setName('check')
@@ -517,16 +547,26 @@ const commands = [
                 .setRequired(false)),
 
     new SlashCommandBuilder()
-        .setName('apply')
-        .setDescription('Apply damage to a player with defense choice')
-        .addIntegerOption(option =>
-            option.setName('damage')
-                .setDescription('Amount of damage to apply')
-                .setRequired(true))
+        .setName('turn')
+        .setDescription('Start new round - refills Armor/Barrier for all combatants in clash (GM only)')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+
+    new SlashCommandBuilder()
+        .setName('resetpenalty')
+        .setDescription('Reset attack or cast penalty for a player (GM only)')
+        .addStringOption(option =>
+            option.setName('type')
+                .setDescription('Which penalty to reset')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Attack', value: 'attack' },
+                    { name: 'Cast', value: 'cast' }
+                ))
         .addUserOption(option =>
-            option.setName('target')
-                .setDescription('Player receiving the damage')
-                .setRequired(true)),
+            option.setName('player')
+                .setDescription('Player to reset penalties for')
+                .setRequired(true))
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new SlashCommandBuilder()
         .setName('clash')
@@ -1063,22 +1103,77 @@ client.on('interactionCreate', async interaction => {
             const dice1 = interaction.options.getInteger('dice1');
             const dice2 = interaction.options.getInteger('dice2');
             const modifier = interaction.options.getInteger('modifier');
-            const gate = interaction.options.getInteger('gate');
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = player.id === interaction.user.id 
-                ? interaction.member 
-                : await interaction.guild.members.fetch(player.id);
+            const manualPenalties = interaction.options.getString('penalties');
+            const player = interaction.user;
+            const playerMember = interaction.member;
 
             initPlayer(player.id, playerMember.displayName);
             const data = playerData.get(player.id);
             const characterName = data.characterName;
+
+            // Increment attack counter
+            const currentCount = (attackCounters.get(player.id) || 0) + 1;
+            attackCounters.set(player.id, currentCount);
+
+            // Check if needs penalty prompt (2nd+ attack without manual penalty)
+            if (currentCount >= 2 && !manualPenalties) {
+                // Show penalty selection buttons
+                const row = new ActionRowBuilder()
+                    .addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_gate`)
+                            .setLabel('🎯 Gate +1')
+                            .setStyle(ButtonStyle.Primary),
+                        new ButtonBuilder()
+                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_damage50`)
+                            .setLabel('⚔️ Damage -50%')
+                            .setStyle(ButtonStyle.Danger),
+                        new ButtonBuilder()
+                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_damage100`)
+                            .setLabel('⚔️ Damage -100%')
+                            .setStyle(ButtonStyle.Danger)
+                    );
+
+                const embed = new EmbedBuilder()
+                    .setColor(0xFFAA00)
+                    .setTitle(`⚠️ Multi-Attack Penalty (${currentCount}${currentCount === 2 ? 'nd' : currentCount === 3 ? 'rd' : 'th'} Attack)`)
+                    .setDescription(`**${characterName}**, choose ONE penalty:`)
+                    .addFields(
+                        { name: '🎯 Gate +1', value: 'Increases gate from 1 to 2', inline: true },
+                        { name: '⚔️ Damage -50%', value: 'Halves damage modifier', inline: true },
+                        { name: '⚔️ Damage -100%', value: 'No damage modifier', inline: true }
+                    )
+                    .setFooter({ text: `Attack #${currentCount} • Choose your penalty` })
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed], components: [row] });
+                return;
+            }
+
+            // Apply penalties
+            let gate = 1;
+            let finalModifier = modifier;
+            let penaltyText = '';
+
+            if (manualPenalties) {
+                if (manualPenalties === 'gate') {
+                    gate = 2;
+                    penaltyText = 'Gate +1';
+                } else if (manualPenalties === 'damage50') {
+                    finalModifier = Math.floor(modifier / 2);
+                    penaltyText = 'Damage -50%';
+                } else if (manualPenalties === 'damage100') {
+                    finalModifier = 0;
+                    penaltyText = 'Damage -100%';
+                }
+            }
 
             // Roll the dice
             const roll1 = Math.floor(Math.random() * dice1) + 1;
             const roll2 = Math.floor(Math.random() * dice2) + 1;
             const total = roll1 + roll2;
             const highRoll = Math.max(roll1, roll2);
-            const damage = highRoll + modifier;
+            const damage = highRoll + finalModifier;
 
             // Determine hit/miss/fumble/crit
             const isFumble = roll1 === 1 && roll2 === 1;
@@ -1086,13 +1181,19 @@ client.on('interactionCreate', async interaction => {
             const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
 
             // Build result text
-            let resultText = `> **${characterName}** ⚔️/✨\n`;
+            let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount})\n`;
+            if (penaltyText) resultText += `> *Penalty: ${penaltyText}*\n`;
             resultText += `> \n`;
             resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
             resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
             resultText += `> \n`;
             resultText += `> HighRoll = **${highRoll}**\n`;
-            resultText += `> HR + ${modifier} = **${damage} damage**\n`;
+            if (penaltyText.includes('Damage')) {
+                resultText += `> Original: HR + ${modifier}\n`;
+                resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
+            } else {
+                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+            }
             resultText += `> \n`;
             
             if (isFumble) {
@@ -1107,8 +1208,98 @@ client.on('interactionCreate', async interaction => {
 
             const embed = new EmbedBuilder()
                 .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                .setTitle(`🎲 Attack/Cast Roll`)
+                .setTitle(`🎲 Attack Roll`)
                 .setDescription(resultText)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+
+        } else if (commandName === 'cast') {
+            const dice1 = interaction.options.getInteger('dice1');
+            const dice2 = interaction.options.getInteger('dice2');
+            const modifier = interaction.options.getInteger('modifier');
+            const manualPenalties = interaction.options.getString('penalties');
+            const player = interaction.user;
+            const playerMember = interaction.member;
+
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+            const characterName = data.characterName;
+
+            // Increment cast counter
+            const currentCount = (castCounters.get(player.id) || 0) + 1;
+            castCounters.set(player.id, currentCount);
+
+            // Calculate MP penalty text only (no auto reduction)
+            let mpPenaltyText = '';
+            if (currentCount === 2) {
+                mpPenaltyText = 'Multi-Cast Penalty: Extra 10 MP';
+            } else if (currentCount >= 3) {
+                mpPenaltyText = 'Multi-Cast Penalty: Extra 20 MP';
+            }
+
+            // Apply manual penalties only
+            let gate = 1;
+            let finalModifier = modifier;
+            let penaltyText = '';
+
+            if (manualPenalties) {
+                if (manualPenalties === 'gate') {
+                    gate = 2;
+                    penaltyText = 'Gate +1';
+                } else if (manualPenalties === 'damage50') {
+                    finalModifier = Math.floor(modifier / 2);
+                    penaltyText = 'Damage -50%';
+                } else if (manualPenalties === 'damage100') {
+                    finalModifier = 0;
+                    penaltyText = 'Damage -100%';
+                }
+            }
+
+            // Roll the dice
+            const roll1 = Math.floor(Math.random() * dice1) + 1;
+            const roll2 = Math.floor(Math.random() * dice2) + 1;
+            const total = roll1 + roll2;
+            const highRoll = Math.max(roll1, roll2);
+            const damage = highRoll + finalModifier;
+
+            // Determine hit/miss/fumble/crit
+            const isFumble = roll1 === 1 && roll2 === 1;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+            const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+            // Build result text
+            let resultText = `> **${characterName}** ✨ (Cast #${currentCount})\n`;
+            if (mpPenaltyText) resultText += `> *${mpPenaltyText}*\n`;
+            if (penaltyText) resultText += `> *Penalty: ${penaltyText}*\n`;
+            resultText += `> \n`;
+            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
+            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+            resultText += `> \n`;
+            resultText += `> HighRoll = **${highRoll}**\n`;
+            if (penaltyText.includes('Damage')) {
+                resultText += `> Original: HR + ${modifier}\n`;
+                resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
+            } else {
+                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+            }
+            resultText += `> \n`;
+            
+            if (isFumble) {
+                resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+            } else if (isCrit) {
+                resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
+            } else if (isHit) {
+                resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+            } else {
+                resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
+            }
+
+            const embed = new EmbedBuilder()
+                .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+                .setTitle(`🎲 Cast Roll`)
+                .setDescription(resultText)
+                .setFooter({ text: `${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP}` })
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
@@ -1161,53 +1352,89 @@ client.on('interactionCreate', async interaction => {
 
             await interaction.reply({ embeds: [embed] });
 
-        } else if (commandName === 'apply') {
-            const damage = interaction.options.getInteger('damage');
-            const target = interaction.options.getUser('target');
-            const attacker = interaction.user;
-            const attackerMember = interaction.member;
-            const targetMember = await interaction.guild.members.fetch(target.id);
+        } else if (commandName === 'turn') {
+            if (!activeEncounter.active) {
+                await interaction.reply({ content: 'No active clash. Use `/clash start` first.', ephemeral: true });
+                return;
+            }
 
-            initPlayer(target.id, targetMember.displayName);
-            initPlayer(attacker.id, attackerMember.displayName);
-            
-            const targetData = playerData.get(target.id);
-            const attackerData = playerData.get(attacker.id);
+            if (activeEncounter.combatants.length === 0) {
+                await interaction.reply({ content: 'No combatants in the clash.', ephemeral: true });
+                return;
+            }
 
-            // Create defense choice buttons
-            const row = new ActionRowBuilder()
-                .addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`defend_armor_${target.id}_${damage}_${attacker.id}`)
-                        .setLabel('🛡️ Use Armor')
-                        .setStyle(ButtonStyle.Primary)
-                        .setDisabled(targetData.Armor <= 0),
-                    new ButtonBuilder()
-                        .setCustomId(`defend_barrier_${target.id}_${damage}_${attacker.id}`)
-                        .setLabel('💎 Use Barrier')
-                        .setStyle(ButtonStyle.Primary)
-                        .setDisabled(targetData.Barrier <= 0),
-                    new ButtonBuilder()
-                        .setCustomId(`defend_none_${target.id}_${damage}_${attacker.id}`)
-                        .setLabel('❌ No Defense')
-                        .setStyle(ButtonStyle.Danger)
-                );
+            // Reset attack and cast counters for all players
+            attackCounters.clear();
+            castCounters.clear();
+
+            // Refill Armor and Barrier for all combatants
+            const refilled = [];
+            const mentions = [];
+
+            for (const userId of activeEncounter.combatants) {
+                const data = playerData.get(userId);
+                if (!data) continue;
+
+                const oldArmor = data.Armor;
+                const oldBarrier = data.Barrier;
+                data.Armor = data.maxArmor;
+                data.Barrier = data.maxBarrier;
+
+                refilled.push({
+                    name: data.characterName,
+                    armorGain: data.maxArmor - oldArmor,
+                    barrierGain: data.maxBarrier - oldBarrier,
+                    currentArmor: data.Armor,
+                    maxArmor: data.maxArmor,
+                    currentBarrier: data.Barrier,
+                    maxBarrier: data.maxBarrier
+                });
+
+                mentions.push(`<@${userId}>`);
+            }
+
+            await saveData();
 
             const embed = new EmbedBuilder()
-                .setColor(0xFF6B6B)
-                .setTitle('⚠️ Incoming Attack!')
-                .setDescription(`**${attackerData.characterName}** is attacking **${targetData.characterName}** for **${damage} damage**!`)
-                .addFields(
-                    { name: 'Your Defenses', value: `🛡️ Armor: ${targetData.Armor}/${targetData.maxArmor}\n💎 Barrier: ${targetData.Barrier}/${targetData.maxBarrier}\n❤️ HP: ${targetData.HP}/${targetData.maxHP}`, inline: false }
-                )
-                .setFooter({ text: `Only ${targetData.characterName} can respond • Expires in 60 seconds` })
+                .setColor(0x00FF00)
+                .setTitle('🔄 New Round Started!')
+                .setDescription('All combatants\' Armor and Barrier have been refilled!\nAttack and Cast penalties reset!')
                 .setTimestamp();
 
+            for (const combatant of refilled) {
+                embed.addFields({
+                    name: `${combatant.name}`,
+                    value: `${RESOURCE_EMOJIS.Armor} Armor: ${combatant.currentArmor}/${combatant.maxArmor} (+${combatant.armorGain})\n${RESOURCE_EMOJIS.Barrier} Barrier: ${combatant.currentBarrier}/${combatant.maxBarrier} (+${combatant.barrierGain})`,
+                    inline: true
+                });
+            }
+
             await interaction.reply({ 
-                content: `<@${target.id}>`,
-                embeds: [embed], 
-                components: [row] 
+                content: mentions.join(' '),
+                embeds: [embed] 
             });
+
+        } else if (commandName === 'resetpenalty') {
+            const type = interaction.options.getString('type');
+            const player = interaction.options.getUser('player');
+
+            if (type === 'attack') {
+                attackCounters.delete(player.id);
+            } else if (type === 'cast') {
+                castCounters.delete(player.id);
+            }
+
+            const playerMember = await interaction.guild.members.fetch(player.id);
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+
+            const embed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('✅ Penalty Reset')
+                .setDescription(`**${data.characterName}**'s ${type} penalty has been reset to 0.`)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'listall') {
             if (!activeEncounter.active) {
@@ -1476,12 +1703,12 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Direct damage\n`/apply <damage> @target` - Interactive damage (target chooses defense)', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/turn` - New round! Refills Armor/Barrier, resets penalties (GM)', 
                         inline: false 
                     },
                     { 
                         name: '🎲 Dice Rolls', 
-                        value: '`/attack <d1> <d2> <mod> <gate> [@player]` - Attack/Cast roll\n• Fail if ANY die ≤ gate\n• Fumble (1,1) = Auto-Fail\n• Crit (same, ≥6) = Auto-Success\n\n`/check <d1> <d2> <gate> [@player]` - Skill check\n• Same rules as attack', 
+                        value: '`/attack <d1> <d2> <mod> [penalty]` - Attack roll (gate always 1)\n• 2nd+ attack: Choose penalty prompt\n• Optional manual penalty\n\n`/cast <d1> <d2> <mod> [penalty]` - Cast roll\n• 2nd cast: +10 MP\n• 3rd+ cast: +20 MP\n\n`/check <d1> <d2> <gate> [@player]` - Skill check', 
                         inline: false 
                     },
                     { 
@@ -1490,13 +1717,13 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     },
                     { 
-                        name: '⚔️ Clash (Encounters)', 
-                        value: '`/clash start` - Start encounter\n`/clash add [@players]` - Add to clash\n`/clash remove @players` - Remove from clash\n`/clash list` - View combatants\n`/clash end` - End encounter', 
+                        name: '⚔️ Clash & GM Tools', 
+                        value: '`/clash start|end|add|remove|list` - Manage encounters\n`/resetpenalty <attack|cast> @player` - Reset penalties (GM)\n`/turn` - New round (GM)', 
                         inline: false 
                     },
                     { 
                         name: '📝 Examples', 
-                        value: '`/attack 10 8 5 2 @John` - John rolls d10+d8, +5 mod, gate 2\n`/apply 13 @Saruman` - Apply 13 damage, Saruman chooses defense\n`/check 10 6 3` - Roll d10 & d6, fail if either ≤3\n`/damage 15 armor @John @Sarah` - 15 damage to both', 
+                        value: '`/attack 10 8 5` - 1st attack, no penalty\n`/attack 10 8 5` - 2nd attack, choose penalty\n`/cast 10 8 5` - Cast with MP penalty\n`/resetpenalty attack @John` - Reset John\'s attacks', 
                         inline: false 
                     }
                 )
@@ -1511,91 +1738,92 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// Handle button interactions for defense choices
+// Handle button interactions for penalty choices
 client.on('interactionCreate', async interaction => {
     if (!interaction.isButton()) return;
 
-    const [action, choice, targetId, damageStr, attackerId] = interaction.customId.split('_');
+    const [action, type, userId, dice1Str, dice2Str, modifierStr, penalty] = interaction.customId.split('_');
     
-    if (action !== 'defend') return;
+    if (action !== 'penalty' || type !== 'attack') return;
 
-    // Only the target can click their defense buttons
-    if (interaction.user.id !== targetId) {
-        await interaction.reply({ content: 'This is not your defense choice!', ephemeral: true });
+    // Only the player can click their penalty buttons
+    if (interaction.user.id !== userId) {
+        await interaction.reply({ content: 'This is not your penalty choice!', ephemeral: true });
         return;
     }
 
-    const damage = parseInt(damageStr);
-    const targetData = playerData.get(targetId);
-    const attackerData = playerData.get(attackerId);
+    const dice1 = parseInt(dice1Str);
+    const dice2 = parseInt(dice2Str);
+    const modifier = parseInt(modifierStr);
 
-    if (!targetData) {
-        await interaction.update({ content: 'Error: Player data not found.', components: [], embeds: [] });
-        return;
+    initPlayer(userId, interaction.member.displayName);
+    const data = playerData.get(userId);
+    const characterName = data.characterName;
+
+    // Get current count
+    const currentCount = attackCounters.get(userId);
+
+    // Apply penalties
+    let gate = 1;
+    let finalModifier = modifier;
+    let penaltyText = '';
+
+    if (penalty === 'gate') {
+        gate = 2;
+        penaltyText = 'Gate +1';
+    } else if (penalty === 'damage50') {
+        finalModifier = Math.floor(modifier / 2);
+        penaltyText = 'Damage -50%';
+    } else if (penalty === 'damage100') {
+        finalModifier = 0;
+        penaltyText = 'Damage -100%';
     }
 
-    let protectionUsed = 0;
-    let hpLost = 0;
-    let defenseType = '';
-    const protectionResource = choice === 'armor' ? 'Armor' : choice === 'barrier' ? 'Barrier' : null;
+    // Roll the dice
+    const roll1 = Math.floor(Math.random() * dice1) + 1;
+    const roll2 = Math.floor(Math.random() * dice2) + 1;
+    const total = roll1 + roll2;
+    const highRoll = Math.max(roll1, roll2);
+    const damage = highRoll + finalModifier;
 
-    if (choice === 'none') {
-        // No defense - all damage to HP
-        hpLost = damage;
-        targetData.HP -= damage;
-        defenseType = 'No Defense';
+    // Determine hit/miss/fumble/crit
+    const isFumble = roll1 === 1 && roll2 === 1;
+    const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+    const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+    // Build result text
+    let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount})\n`;
+    resultText += `> *Penalty: ${penaltyText}*\n`;
+    resultText += `> \n`;
+    resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
+    resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+    resultText += `> \n`;
+    resultText += `> HighRoll = **${highRoll}**\n`;
+    if (penaltyText.includes('Damage')) {
+        resultText += `> Original: HR + ${modifier}\n`;
+        resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
     } else {
-        // Use armor or barrier
-        defenseType = protectionResource;
-        let remainingDamage = damage;
-
-        if (targetData[protectionResource] > 0) {
-            if (targetData[protectionResource] >= remainingDamage) {
-                // Protection absorbs all damage
-                protectionUsed = remainingDamage;
-                targetData[protectionResource] -= remainingDamage;
-                remainingDamage = 0;
-            } else {
-                // Protection absorbs some, rest goes to HP
-                protectionUsed = targetData[protectionResource];
-                remainingDamage -= targetData[protectionResource];
-                targetData[protectionResource] = 0;
-            }
-        }
-
-        // Apply remaining damage to HP
-        if (remainingDamage > 0) {
-            hpLost = remainingDamage;
-            targetData.HP -= remainingDamage;
-        }
+        resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+    }
+    resultText += `> \n`;
+    
+    if (isFumble) {
+        resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+    } else if (isCrit) {
+        resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
+    } else if (isHit) {
+        resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+    } else {
+        resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
     }
 
-    await saveData();
-
-    // Build result embed
-    const resultEmbed = new EmbedBuilder()
-        .setColor(0xFF0000)
-        .setTitle('💥 Damage Applied!')
-        .setDescription(`**${targetData.characterName}** chose: **${defenseType}**`)
+    const embed = new EmbedBuilder()
+        .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+        .setTitle(`🎲 Attack Roll`)
+        .setDescription(resultText)
         .setTimestamp();
 
-    if (choice !== 'none' && protectionResource) {
-        resultEmbed.addFields(
-            { name: `${RESOURCE_EMOJIS[protectionResource]} ${protectionResource}`, value: `Absorbed: **${protectionUsed}** damage`, inline: true }
-        );
-    }
-
-    if (hpLost > 0) {
-        resultEmbed.addFields(
-            { name: `${RESOURCE_EMOJIS.HP} HP Damage`, value: `Lost: **${hpLost}** HP`, inline: true }
-        );
-    }
-
-    resultEmbed.addFields(
-        { name: 'Current Status', value: `${RESOURCE_EMOJIS.HP} HP: ${targetData.HP}/${targetData.maxHP}\n${RESOURCE_EMOJIS.Armor} Armor: ${targetData.Armor}/${targetData.maxArmor}\n${RESOURCE_EMOJIS.Barrier} Barrier: ${targetData.Barrier}/${targetData.maxBarrier}`, inline: false }
-    );
-
-    await interaction.update({ embeds: [resultEmbed], components: [] });
+    await interaction.update({ embeds: [embed], components: [] });
 });
 
 // Login to Discord
