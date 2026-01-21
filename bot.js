@@ -45,8 +45,8 @@ let attackCounters = new Map(); // userId -> count
 let castCounters = new Map(); // userId -> count
 
 // Cumulative penalty tracking
-let attackPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
-let castPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
+let attackPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0, blind: false }
+let castPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0, blind: false }
 
 // Resource types
 const RESOURCES = ['HP', 'MP', 'IP', 'Armor', 'Barrier'];
@@ -501,8 +501,9 @@ const commands = [
                 .setRequired(false)
                 .addChoices(
                     { name: 'Gate +1', value: 'gate' },
-                    { name: 'Damage -50%', value: 'damage50' },
-                    { name: 'Damage -100%', value: 'damage100' }
+                    { name: '-50% Modifier', value: 'damage50' },
+                    { name: 'No Modifier', value: 'damage100' },
+                    { name: 'Blind (Gate 3)', value: 'blind' }
                 )),
 
     new SlashCommandBuilder()
@@ -526,8 +527,9 @@ const commands = [
                 .setRequired(false)
                 .addChoices(
                     { name: 'Gate +1', value: 'gate' },
-                    { name: 'Damage -50%', value: 'damage50' },
-                    { name: 'Damage -100%', value: 'damage100' }
+                    { name: '-50% Modifier', value: 'damage50' },
+                    { name: 'No Modifier', value: 'damage100' },
+                    { name: 'Blind (Gate 3)', value: 'blind' }
                 )),
 
     new SlashCommandBuilder()
@@ -1117,7 +1119,7 @@ client.on('interactionCreate', async interaction => {
 
             // Initialize penalty tracking if needed
             if (!attackPenalties.has(player.id)) {
-                attackPenalties.set(player.id, { gate: 0, damageReduction: 0 });
+                attackPenalties.set(player.id, { gate: 0, damageReduction: 0, blind: false });
             }
 
             // Increment attack counter
@@ -1132,7 +1134,8 @@ client.on('interactionCreate', async interaction => {
                 // Show penalty selection buttons
                 const currentPenaltiesText = [];
                 if (penalties.gate > 0) currentPenaltiesText.push(`Gate +${penalties.gate}`);
-                if (penalties.damageReduction > 0) currentPenaltiesText.push(`Damage -${penalties.damageReduction}%`);
+                if (penalties.damageReduction > 0) currentPenaltiesText.push(`Modifier -${penalties.damageReduction}%`);
+                if (penalties.blind) currentPenaltiesText.push(`Blind (Gate 3)`);
                 
                 const row = new ActionRowBuilder()
                     .addComponents(
@@ -1142,12 +1145,17 @@ client.on('interactionCreate', async interaction => {
                             .setStyle(ButtonStyle.Primary),
                         new ButtonBuilder()
                             .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_damage50`)
-                            .setLabel('⚔️ Damage -50%')
+                            .setLabel('⚔️ -50% Modifier')
                             .setStyle(ButtonStyle.Danger),
                         new ButtonBuilder()
                             .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_damage100`)
-                            .setLabel('⚔️ Damage -100%')
-                            .setStyle(ButtonStyle.Danger)
+                            .setLabel('⚔️ No Modifier')
+                            .setStyle(ButtonStyle.Danger),
+                        new ButtonBuilder()
+                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_blind`)
+                            .setLabel('👁️ Blind (Gate 3)')
+                            .setStyle(ButtonStyle.Secondary)
+                            .setDisabled(penalties.blind) // Can only apply once
                     );
 
                 let description = `**${characterName}**, choose ONE penalty to ADD:`;
@@ -1161,8 +1169,9 @@ client.on('interactionCreate', async interaction => {
                     .setDescription(description)
                     .addFields(
                         { name: '🎯 Gate +1', value: 'Adds +1 to gate (cumulative)', inline: true },
-                        { name: '⚔️ Damage -50%', value: 'Reduces damage by 50%', inline: true },
-                        { name: '⚔️ Damage -100%', value: 'No damage modifier', inline: true }
+                        { name: '⚔️ -50% Modifier', value: 'Reduces modifier by 50%', inline: true },
+                        { name: '⚔️ No Modifier', value: 'Removes all modifier', inline: true },
+                        { name: '👁️ Blind', value: 'Sets gate to 3 (max, once only)', inline: true }
                     )
                     .setFooter({ text: `Attack #${currentCount} • Penalties are cumulative` })
                     .setTimestamp();
@@ -1178,19 +1187,22 @@ client.on('interactionCreate', async interaction => {
                 } else if (manualPenalties === 'damage50') {
                     penalties.damageReduction += 50;
                 } else if (manualPenalties === 'damage100') {
-                    penalties.damageReduction = 100;
+                    penalties.damageReduction += 100;
+                } else if (manualPenalties === 'blind') {
+                    penalties.blind = true;
                 }
             }
 
-            // Calculate final values with cumulative penalties
-            const gate = 1 + penalties.gate;
+            // Calculate final gate (blind sets to 3, otherwise 1 + gate penalties)
+            const gate = penalties.blind ? 3 : (1 + penalties.gate);
             const damageMultiplier = Math.max(0, 1 - (penalties.damageReduction / 100));
             const finalModifier = Math.floor(modifier * damageMultiplier);
 
             // Build penalty text
             const penaltyTexts = [];
-            if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
-            if (penalties.damageReduction > 0) penaltyTexts.push(`Damage -${penalties.damageReduction}%`);
+            if (penalties.blind) penaltyTexts.push(`Blind (Gate 3)`);
+            else if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
+            if (penalties.damageReduction > 0) penaltyTexts.push(`Modifier -${penalties.damageReduction}%`);
             const penaltyText = penaltyTexts.length > 0 ? penaltyTexts.join(', ') : 'None';
 
             // Roll the dice
@@ -1800,17 +1812,20 @@ client.on('interactionCreate', async interaction => {
         penalties.damageReduction += 50;
     } else if (penalty === 'damage100') {
         penalties.damageReduction += 100;
+    } else if (penalty === 'blind') {
+        penalties.blind = true;
     }
 
-    // Calculate final values
-    let gate = 1 + penalties.gate;
+    // Calculate final values (blind sets gate to 3)
+    let gate = penalties.blind ? 3 : (1 + penalties.gate);
     let damageMultiplier = 1 - (penalties.damageReduction / 100);
     const finalModifier = Math.floor(modifier * damageMultiplier);
 
     // Build cumulative penalty text
     const cumulativeParts = [];
-    if (penalties.gate > 0) cumulativeParts.push(`Gate +${penalties.gate}`);
-    if (penalties.damageReduction > 0) cumulativeParts.push(`Damage -${penalties.damageReduction}%`);
+    if (penalties.blind) cumulativeParts.push(`Blind (Gate 3)`);
+    else if (penalties.gate > 0) cumulativeParts.push(`Gate +${penalties.gate}`);
+    if (penalties.damageReduction > 0) cumulativeParts.push(`Modifier -${penalties.damageReduction}%`);
     const cumulativeText = cumulativeParts.join(', ');
 
     // Roll the dice
