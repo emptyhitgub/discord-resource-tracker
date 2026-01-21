@@ -48,10 +48,6 @@ let castCounters = new Map(); // userId -> count
 let attackPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
 let castPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
 
-// Penalty tracking (cumulative)
-let attackPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
-let castPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
-
 // Resource types
 const RESOURCES = ['HP', 'MP', 'IP', 'Armor', 'Barrier'];
 
