@@ -44,6 +44,14 @@ let activeEncounter = {
 let attackCounters = new Map(); // userId -> count
 let castCounters = new Map(); // userId -> count
 
+// Cumulative penalty tracking
+let attackPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
+let castPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
+
+// Penalty tracking (cumulative)
+let attackPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
+let castPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0 }
+
 // Resource types
 const RESOURCES = ['HP', 'MP', 'IP', 'Armor', 'Barrier'];
 
@@ -665,12 +673,12 @@ client.on('interactionCreate', async interaction => {
             data.maxArmor = newMaxArmor;
             data.maxBarrier = newMaxBarrier;
 
-            // Set HP and MP to new max, keep IP, reset Armor and Barrier
+            // Set HP, MP, Armor, and Barrier to new max, keep IP
             data.HP = newMaxHP;
             data.MP = newMaxMP;
             data.IP = currentIP; // Preserve current IP
-            data.Armor = 0;
-            data.Barrier = 0;
+            data.Armor = newMaxArmor; // Set to full
+            data.Barrier = newMaxBarrier; // Set to full
 
             data.username = playerMember.displayName;
             data.characterName = characterName;
@@ -680,7 +688,7 @@ client.on('interactionCreate', async interaction => {
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle(`✨ Max Resources Set for ${characterName}`)
-                .setDescription('HP and MP restored to new max. IP preserved. Armor and Barrier reset to 0.')
+                .setDescription('HP, MP, Armor, and Barrier restored to max. IP preserved.')
                 .addFields(
                     { name: `${RESOURCE_EMOJIS.HP} HP`, value: `${data.HP}/${data.maxHP}`, inline: true },
                     { name: `${RESOURCE_EMOJIS.MP} MP`, value: `${data.MP}/${data.maxMP}`, inline: true },
@@ -830,15 +838,15 @@ client.on('interactionCreate', async interaction => {
             data.HP = data.maxHP;
             data.MP = data.maxMP;
             // IP stays as is
-            data.Armor = 0;
-            data.Barrier = 0;
+            data.Armor = data.maxArmor; // Set to full
+            data.Barrier = data.maxBarrier; // Set to full
 
             saveData(); // Save after modification
 
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle(`✨ ${data.characterName} Rested!`)
-                .setDescription('HP and MP restored. IP stays. Armor and Barrier reset to 0.')
+                .setDescription('HP, MP, Armor, and Barrier fully restored. IP stays.')
                 .addFields(
                     { name: `${RESOURCE_EMOJIS.HP} HP`, value: `${data.HP}/${data.maxHP}`, inline: true },
                     { name: `${RESOURCE_EMOJIS.MP} MP`, value: `${data.MP}/${data.maxMP}`, inline: true },
@@ -1111,13 +1119,25 @@ client.on('interactionCreate', async interaction => {
             const data = playerData.get(player.id);
             const characterName = data.characterName;
 
+            // Initialize penalty tracking if needed
+            if (!attackPenalties.has(player.id)) {
+                attackPenalties.set(player.id, { gate: 0, damageReduction: 0 });
+            }
+
             // Increment attack counter
             const currentCount = (attackCounters.get(player.id) || 0) + 1;
             attackCounters.set(player.id, currentCount);
 
+            // Get cumulative penalties
+            const penalties = attackPenalties.get(player.id);
+
             // Check if needs penalty prompt (2nd+ attack without manual penalty)
             if (currentCount >= 2 && !manualPenalties) {
                 // Show penalty selection buttons
+                const currentPenaltiesText = [];
+                if (penalties.gate > 0) currentPenaltiesText.push(`Gate +${penalties.gate}`);
+                if (penalties.damageReduction > 0) currentPenaltiesText.push(`Damage -${penalties.damageReduction}%`);
+                
                 const row = new ActionRowBuilder()
                     .addComponents(
                         new ButtonBuilder()
@@ -1134,39 +1154,48 @@ client.on('interactionCreate', async interaction => {
                             .setStyle(ButtonStyle.Danger)
                     );
 
+                let description = `**${characterName}**, choose ONE penalty to ADD:`;
+                if (currentPenaltiesText.length > 0) {
+                    description += `\n\n**Current Penalties:** ${currentPenaltiesText.join(', ')}`;
+                }
+
                 const embed = new EmbedBuilder()
                     .setColor(0xFFAA00)
                     .setTitle(`⚠️ Multi-Attack Penalty (${currentCount}${currentCount === 2 ? 'nd' : currentCount === 3 ? 'rd' : 'th'} Attack)`)
-                    .setDescription(`**${characterName}**, choose ONE penalty:`)
+                    .setDescription(description)
                     .addFields(
-                        { name: '🎯 Gate +1', value: 'Increases gate from 1 to 2', inline: true },
-                        { name: '⚔️ Damage -50%', value: 'Halves damage modifier', inline: true },
+                        { name: '🎯 Gate +1', value: 'Adds +1 to gate (cumulative)', inline: true },
+                        { name: '⚔️ Damage -50%', value: 'Reduces damage by 50%', inline: true },
                         { name: '⚔️ Damage -100%', value: 'No damage modifier', inline: true }
                     )
-                    .setFooter({ text: `Attack #${currentCount} • Choose your penalty` })
+                    .setFooter({ text: `Attack #${currentCount} • Penalties are cumulative` })
                     .setTimestamp();
 
                 await interaction.reply({ embeds: [embed], components: [row] });
                 return;
             }
 
-            // Apply penalties
-            let gate = 1;
-            let finalModifier = modifier;
-            let penaltyText = '';
-
+            // Apply manual penalty if provided
             if (manualPenalties) {
                 if (manualPenalties === 'gate') {
-                    gate = 2;
-                    penaltyText = 'Gate +1';
+                    penalties.gate += 1;
                 } else if (manualPenalties === 'damage50') {
-                    finalModifier = Math.floor(modifier / 2);
-                    penaltyText = 'Damage -50%';
+                    penalties.damageReduction += 50;
                 } else if (manualPenalties === 'damage100') {
-                    finalModifier = 0;
-                    penaltyText = 'Damage -100%';
+                    penalties.damageReduction = 100;
                 }
             }
+
+            // Calculate final values with cumulative penalties
+            const gate = 1 + penalties.gate;
+            const damageMultiplier = Math.max(0, 1 - (penalties.damageReduction / 100));
+            const finalModifier = Math.floor(modifier * damageMultiplier);
+
+            // Build penalty text
+            const penaltyTexts = [];
+            if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
+            if (penalties.damageReduction > 0) penaltyTexts.push(`Damage -${penalties.damageReduction}%`);
+            const penaltyText = penaltyTexts.length > 0 ? penaltyTexts.join(', ') : 'None';
 
             // Roll the dice
             const roll1 = Math.floor(Math.random() * dice1) + 1;
@@ -1182,13 +1211,13 @@ client.on('interactionCreate', async interaction => {
 
             // Build result text
             let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount})\n`;
-            if (penaltyText) resultText += `> *Penalty: ${penaltyText}*\n`;
+            if (penaltyText !== 'None') resultText += `> *Penalties: ${penaltyText}*\n`;
             resultText += `> \n`;
             resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
             resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
             resultText += `> \n`;
             resultText += `> HighRoll = **${highRoll}**\n`;
-            if (penaltyText.includes('Damage')) {
+            if (penalties.damageReduction > 0) {
                 resultText += `> Original: HR + ${modifier}\n`;
                 resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
             } else {
@@ -1363,9 +1392,11 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            // Reset attack and cast counters for all players
+            // Reset attack and cast counters and penalties for all players
             attackCounters.clear();
             castCounters.clear();
+            attackPenalties.clear();
+            castPenalties.clear();
 
             // Refill Armor and Barrier for all combatants
             const refilled = [];
@@ -1420,8 +1451,10 @@ client.on('interactionCreate', async interaction => {
 
             if (type === 'attack') {
                 attackCounters.delete(player.id);
+                attackPenalties.delete(player.id);
             } else if (type === 'cast') {
                 castCounters.delete(player.id);
+                castPenalties.delete(player.id);
             }
 
             const playerMember = await interaction.guild.members.fetch(player.id);
@@ -1431,7 +1464,7 @@ client.on('interactionCreate', async interaction => {
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle('✅ Penalty Reset')
-                .setDescription(`**${data.characterName}**'s ${type} penalty has been reset to 0.`)
+                .setDescription(`**${data.characterName}**'s ${type} penalty and counter have been reset to 0.`)
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
@@ -1763,21 +1796,26 @@ client.on('interactionCreate', async interaction => {
     // Get current count
     const currentCount = attackCounters.get(userId);
 
-    // Apply penalties
-    let gate = 1;
-    let finalModifier = modifier;
-    let penaltyText = '';
-
+    // Add penalty cumulatively
+    const penalties = attackPenalties.get(userId);
     if (penalty === 'gate') {
-        gate = 2;
-        penaltyText = 'Gate +1';
+        penalties.gate += 1;
     } else if (penalty === 'damage50') {
-        finalModifier = Math.floor(modifier / 2);
-        penaltyText = 'Damage -50%';
+        penalties.damageReduction += 50;
     } else if (penalty === 'damage100') {
-        finalModifier = 0;
-        penaltyText = 'Damage -100%';
+        penalties.damageReduction += 100;
     }
+
+    // Calculate final values
+    let gate = 1 + penalties.gate;
+    let damageMultiplier = 1 - (penalties.damageReduction / 100);
+    const finalModifier = Math.floor(modifier * damageMultiplier);
+
+    // Build cumulative penalty text
+    const cumulativeParts = [];
+    if (penalties.gate > 0) cumulativeParts.push(`Gate +${penalties.gate}`);
+    if (penalties.damageReduction > 0) cumulativeParts.push(`Damage -${penalties.damageReduction}%`);
+    const cumulativeText = cumulativeParts.join(', ');
 
     // Roll the dice
     const roll1 = Math.floor(Math.random() * dice1) + 1;
@@ -1793,13 +1831,13 @@ client.on('interactionCreate', async interaction => {
 
     // Build result text
     let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount})\n`;
-    resultText += `> *Penalty: ${penaltyText}*\n`;
+    resultText += `> *Cumulative Penalties: ${cumulativeText}*\n`;
     resultText += `> \n`;
     resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
     resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
     resultText += `> \n`;
     resultText += `> HighRoll = **${highRoll}**\n`;
-    if (penaltyText.includes('Damage')) {
+    if (damageMultiplier < 1) {
         resultText += `> Original: HR + ${modifier}\n`;
         resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
     } else {
