@@ -2245,8 +2245,8 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     },
                     { 
+                        name: '📝 Examples', 
                         value: '**Attack:** `/actionsave add sword attack 10 8 5`\n**Cast:** `/actionsave add fireball cast 10 8 15 20`\n**Use:** `/use sword` or `/use fireball`', 
-                        value: '**Attack:** `/actionsave add sword attack 10 8 5`\n**Cast:** `/actionsave add fireball cast 10 8 15 20`\n**Use:** `/sword` or `/fireball`', 
                         inline: false 
                     }
                 )
