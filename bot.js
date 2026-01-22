@@ -1478,13 +1478,16 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'round') {
+            // Defer reply immediately to prevent timeout
+            await interaction.deferReply();
+
             if (!activeEncounter.active) {
-                await interaction.reply({ content: 'No active clash. Use `/clash start` first.', ephemeral: true });
+                await interaction.editReply({ content: 'No active clash. Use `/clash start` first.' });
                 return;
             }
 
             if (activeEncounter.combatants.length === 0) {
-                await interaction.reply({ content: 'No combatants in the clash.', ephemeral: true });
+                await interaction.editReply({ content: 'No combatants in the clash.' });
                 return;
             }
 
@@ -1498,29 +1501,17 @@ client.on('interactionCreate', async interaction => {
             activeEncounter.turnsTaken.clear();
 
             // Refill Armor and Barrier for all combatants
-            const refilled = [];
             const mentions = [];
+            let refilledCount = 0;
 
             for (const userId of activeEncounter.combatants) {
                 const data = playerData.get(userId);
                 if (!data) continue;
 
-                const oldArmor = data.Armor;
-                const oldBarrier = data.Barrier;
                 data.Armor = data.maxArmor;
                 data.Barrier = data.maxBarrier;
-
-                refilled.push({
-                    name: data.characterName,
-                    armorGain: data.maxArmor - oldArmor,
-                    barrierGain: data.maxBarrier - oldBarrier,
-                    currentArmor: data.Armor,
-                    maxArmor: data.maxArmor,
-                    currentBarrier: data.Barrier,
-                    maxBarrier: data.maxBarrier
-                });
-
                 mentions.push(`<@${userId}>`);
+                refilledCount++;
             }
 
             await saveData();
@@ -1528,18 +1519,11 @@ client.on('interactionCreate', async interaction => {
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle('🔄 New Round Started!')
-                .setDescription('All combatants\' Armor and Barrier have been refilled!\nAttack and Cast penalties reset!')
+                .setDescription(`✅ Armor & Barrier refilled for ${refilledCount} combatant(s)\n✅ Attack & Cast penalties reset\n✅ Turn tracker reset\n\nUse \`/clash list\` to see updated stats`)
+                .setFooter({ text: 'Good luck in the new round!' })
                 .setTimestamp();
 
-            for (const combatant of refilled) {
-                embed.addFields({
-                    name: `${combatant.name}`,
-                    value: `${RESOURCE_EMOJIS.Armor} Armor: ${combatant.currentArmor}/${combatant.maxArmor} (+${combatant.armorGain})\n${RESOURCE_EMOJIS.Barrier} Barrier: ${combatant.currentBarrier}/${combatant.maxBarrier} (+${combatant.barrierGain})`,
-                    inline: true
-                });
-            }
-
-            await interaction.reply({ 
+            await interaction.editReply({ 
                 content: mentions.join(' '),
                 embeds: [embed] 
             });
