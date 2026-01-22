@@ -37,10 +37,11 @@ let playerData = new Map();
 // Active encounter data
 let activeEncounter = {
     active: false,
-    combatants: [] // Array of userIds
+    combatants: [], // Array of userIds
+    turnsTaken: new Set() // Track who has taken their turn this round
 };
 
-// Attack and Cast counters (resets on /turn)
+// Attack and Cast counters (resets on /round)
 let attackCounters = new Map(); // userId -> count
 let castCounters = new Map(); // userId -> count
 
@@ -270,7 +271,8 @@ function initPlayer(userId, displayName, characterName = null) {
             maxIP: 0,
             maxArmor: 0,
             maxBarrier: 0,
-            statusEffects: []  // Array of {name: string, duration: number}
+            statusEffects: [],  // Array of {name: string, duration: number}
+            savedActions: {}    // Object of {actionName: {type, dice1, dice2, modifier, mpCost}}
         });
     } else {
         // Update display name in case it changed
@@ -278,6 +280,10 @@ function initPlayer(userId, displayName, characterName = null) {
         // Update character name if provided
         if (characterName) {
             playerData.get(userId).characterName = characterName;
+        }
+        // Initialize savedActions if it doesn't exist (for existing players)
+        if (!playerData.get(userId).savedActions) {
+            playerData.get(userId).savedActions = {};
         }
     }
 }
@@ -553,7 +559,63 @@ const commands = [
                 .setRequired(false)),
 
     new SlashCommandBuilder()
-        .setName('turn')
+        .setName('actionsave')
+        .setDescription('Save, list, or delete custom attack/cast actions')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('add')
+                .setDescription('Save a new action')
+                .addStringOption(option =>
+                    option.setName('name')
+                        .setDescription('Action name (e.g., "fireball", "sword_slash")')
+                        .setRequired(true))
+                .addStringOption(option =>
+                    option.setName('type')
+                        .setDescription('Action type')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'Attack (uses weapon modifier)', value: 'attack' },
+                            { name: 'Cast (uses MP cost)', value: 'cast' }
+                        ))
+                .addIntegerOption(option =>
+                    option.setName('dice1')
+                        .setDescription('First dice size (e.g., 10 for d10)')
+                        .setRequired(true))
+                .addIntegerOption(option =>
+                    option.setName('dice2')
+                        .setDescription('Second dice size (e.g., 8 for d8)')
+                        .setRequired(true))
+                .addIntegerOption(option =>
+                    option.setName('modifier')
+                        .setDescription('For Attack: weapon modifier | For Cast: spell damage bonus')
+                        .setRequired(true))
+                .addIntegerOption(option =>
+                    option.setName('mpcost')
+                        .setDescription('For Cast only: base MP cost (multicast adds +10/+20)')
+                        .setRequired(false)))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('list')
+                .setDescription('List all your saved actions'))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('delete')
+                .setDescription('Delete a saved action')
+                .addStringOption(option =>
+                    option.setName('name')
+                        .setDescription('Action name to delete')
+                        .setRequired(true))),
+
+    new SlashCommandBuilder()
+        .setName('eot')
+        .setDescription('Mark turn as complete (End of Turn)')
+        .addUserOption(option =>
+            option.setName('player')
+                .setDescription('Player who finished their turn (GM can specify, defaults to self)')
+                .setRequired(false)),
+
+    new SlashCommandBuilder()
+        .setName('round')
         .setDescription('Start new round - refills Armor/Barrier for all combatants in clash (GM only)')
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
@@ -604,7 +666,11 @@ const commands = [
         .addSubcommand(subcommand =>
             subcommand
                 .setName('list')
-                .setDescription('List all combatants in the active encounter')),
+                .setDescription('List all combatants in the active encounter'))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('init')
+                .setDescription('Show initiative tracker (who has taken their turn)')),
 
     new SlashCommandBuilder()
         .setName('guide')
@@ -648,6 +714,202 @@ client.on('interactionCreate', async interaction => {
     const { commandName } = interaction;
 
     try {
+        // Check if command is a saved action
+        const player = interaction.user;
+        const playerMember = interaction.member;
+        
+        initPlayer(player.id, playerMember.displayName);
+        const data = playerData.get(player.id);
+        
+        if (data.savedActions && data.savedActions[commandName]) {
+            const action = data.savedActions[commandName];
+            const characterName = data.characterName;
+
+            // Handle CAST type
+            if (action.type === 'cast') {
+                // Increment cast counter
+                const currentCount = (castCounters.get(player.id) || 0) + 1;
+                castCounters.set(player.id, currentCount);
+
+                // Calculate MP penalty
+                let mpPenaltyText = '';
+                if (currentCount === 2) {
+                    mpPenaltyText = 'Multi-Cast Penalty: Extra 10 MP';
+                } else if (currentCount >= 3) {
+                    mpPenaltyText = 'Multi-Cast Penalty: Extra 20 MP';
+                }
+
+                // Calculate final gate and modifier (no penalties for cast)
+                const gate = 1;
+                const finalModifier = action.modifier;
+
+                // Roll the dice
+                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
+                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
+                const total = roll1 + roll2;
+                const highRoll = Math.max(roll1, roll2);
+                const damage = highRoll + finalModifier;
+
+                // Determine hit/miss/fumble/crit
+                const isFumble = roll1 === 1 && roll2 === 1;
+                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+                // Build result text
+                let resultText = `> **${characterName}** ✨ (Cast #${currentCount}) - **${commandName}**\n`;
+                if (mpPenaltyText) {
+                    resultText += `> *${mpPenaltyText}*\n`;
+                }
+                resultText += `> \n`;
+                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
+                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+                resultText += `> \n`;
+                resultText += `> HighRoll = **${highRoll}**\n`;
+                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+                resultText += `> \n`;
+                
+                if (isFumble) {
+                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+                } else if (isCrit) {
+                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
+                } else if (isHit) {
+                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+                } else {
+                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+                    .setTitle(`🎲 Cast Roll`)
+                    .setDescription(resultText)
+                    .setFooter({ text: `💧 MP: ${data.MP}/${data.maxMP} | Base cost: ${action.mpCost} MP` })
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+                return;
+            }
+
+            // Handle ATTACK type
+            if (action.type === 'attack') {
+                // Increment attack counter
+                const currentCount = (attackCounters.get(player.id) || 0) + 1;
+                attackCounters.set(player.id, currentCount);
+
+                // Get current cumulative penalties
+                if (!attackPenalties.has(player.id)) {
+                    attackPenalties.set(player.id, { gate: 0, damageReduction: 0, blind: false });
+                }
+                const penalties = attackPenalties.get(player.id);
+
+                // Check if needs penalty prompt (2nd+ attack)
+                if (currentCount >= 2) {
+                    const row = new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_gate`)
+                                .setLabel('🎯 Gate +1')
+                                .setStyle(ButtonStyle.Primary),
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_damage50`)
+                                .setLabel('⚔️ -50% Modifier')
+                                .setStyle(ButtonStyle.Danger),
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_damage100`)
+                                .setLabel('⚔️ No Modifier')
+                                .setStyle(ButtonStyle.Danger),
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_blind`)
+                                .setLabel('👁️ Blind (Gate 3)')
+                                .setStyle(ButtonStyle.Secondary)
+                                .setDisabled(penalties.blind)
+                        );
+
+                    let description = `**${characterName}** using **${commandName}**, choose ONE penalty to ADD:`;
+                    const currentPenaltiesText = [];
+                    if (penalties.blind) currentPenaltiesText.push(`Blind (Gate 3)`);
+                    else if (penalties.gate > 0) currentPenaltiesText.push(`Gate +${penalties.gate}`);
+                    if (penalties.damageReduction > 0) currentPenaltiesText.push(`Modifier -${penalties.damageReduction}%`);
+                    if (currentPenaltiesText.length > 0) {
+                        description += `\n\n**Current Penalties:** ${currentPenaltiesText.join(', ')}`;
+                    }
+
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFFAA00)
+                        .setTitle(`⚠️ Multi-Attack Penalty (${currentCount}${currentCount === 2 ? 'nd' : currentCount === 3 ? 'rd' : 'th'} Attack)`)
+                        .setDescription(description)
+                        .addFields(
+                            { name: '🎯 Gate +1', value: 'Adds +1 to gate (cumulative)', inline: true },
+                            { name: '⚔️ -50% Modifier', value: 'Reduces modifier by 50%', inline: true },
+                            { name: '⚔️ No Modifier', value: 'Removes all modifier', inline: true },
+                            { name: '👁️ Blind', value: 'Sets gate to 3 (max, once only)', inline: true }
+                        )
+                        .setFooter({ text: `Attack #${currentCount} • Penalties are cumulative` })
+                        .setTimestamp();
+
+                    await interaction.reply({ embeds: [embed], components: [row] });
+                    return;
+                }
+
+                // Calculate final gate and modifier with cumulative penalties
+                const gate = penalties.blind ? 3 : (1 + penalties.gate);
+                const damageMultiplier = Math.max(0, 1 - (penalties.damageReduction / 100));
+                const finalModifier = Math.floor(action.modifier * damageMultiplier);
+
+                // Roll the dice
+                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
+                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
+                const total = roll1 + roll2;
+                const highRoll = Math.max(roll1, roll2);
+                const damage = highRoll + finalModifier;
+
+                // Determine hit/miss/fumble/crit
+                const isFumble = roll1 === 1 && roll2 === 1;
+                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+                // Build result text
+                let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount}) - **${commandName}**\n`;
+                if (penalties.gate > 0 || penalties.damageReduction > 0 || penalties.blind) {
+                    const penaltyTexts = [];
+                    if (penalties.blind) penaltyTexts.push(`Blind (Gate 3)`);
+                    else if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
+                    if (penalties.damageReduction > 0) penaltyTexts.push(`Modifier -${penalties.damageReduction}%`);
+                    resultText += `> *Cumulative Penalties: ${penaltyTexts.join(', ')}*\n`;
+                }
+                resultText += `> \n`;
+                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
+                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+                resultText += `> \n`;
+                resultText += `> HighRoll = **${highRoll}**\n`;
+                if (penalties.damageReduction > 0) {
+                    resultText += `> Original: HR + ${action.modifier}\n`;
+                    resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
+                } else {
+                    resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+                }
+                resultText += `> \n`;
+                
+                if (isFumble) {
+                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+                } else if (isCrit) {
+                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
+                } else if (isHit) {
+                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+                } else {
+                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+                    .setTitle(`🎲 Attack Roll`)
+                    .setDescription(resultText)
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+                return; // Exit early, don't check other commands
+            } // End of attack type handling
+        } // End of saved action check
+
         if (commandName === 'set') {
             const player = interaction.options.getUser('player');
             const playerMember = await interaction.guild.members.fetch(player.id);
@@ -1389,7 +1651,7 @@ client.on('interactionCreate', async interaction => {
 
             await interaction.reply({ embeds: [embed] });
 
-        } else if (commandName === 'turn') {
+        } else if (commandName === 'round') {
             if (!activeEncounter.active) {
                 await interaction.reply({ content: 'No active clash. Use `/clash start` first.', ephemeral: true });
                 return;
@@ -1405,6 +1667,9 @@ client.on('interactionCreate', async interaction => {
             castCounters.clear();
             attackPenalties.clear();
             castPenalties.clear();
+            
+            // Reset turn tracking
+            activeEncounter.turnsTaken.clear();
 
             // Refill Armor and Barrier for all combatants
             const refilled = [];
@@ -1522,28 +1787,34 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
+            // Sort players alphabetically by character name
+            const sortedPlayers = Array.from(playerData.entries())
+                .sort((a, b) => a[1].characterName.localeCompare(b[1].characterName));
+
             const embed = new EmbedBuilder()
                 .setColor(0x9B59B6)
                 .setTitle('📊 All Players - Resources Overview')
                 .setTimestamp();
 
-            for (const [userId, data] of playerData) {
-                const resourceText = `${RESOURCE_EMOJIS.HP} **HP:** ${data.HP}/${data.maxHP}\n${RESOURCE_EMOJIS.MP} **MP:** ${data.MP}/${data.maxMP}\n${RESOURCE_EMOJIS.IP} **IP:** ${data.IP}/${data.maxIP}\n${RESOURCE_EMOJIS.Armor} **Armor:** ${data.Armor}/${data.maxArmor}\n${RESOURCE_EMOJIS.Barrier} **Barrier:** ${data.Barrier}/${data.maxBarrier}`;
+            for (const [userId, data] of sortedPlayers) {
+                // Compact format like /clash list
+                let valueText = `${RESOURCE_EMOJIS.HP} HP: ${data.HP}/${data.maxHP} | ${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP} | ${RESOURCE_EMOJIS.IP} IP: ${data.IP}/${data.maxIP} | ${RESOURCE_EMOJIS.Armor} Armor: ${data.Armor}/${data.maxArmor} | ${RESOURCE_EMOJIS.Barrier} Barrier: ${data.Barrier}/${data.maxBarrier}`;
                 
-                let fieldValue = resourceText;
                 if (data.statusEffects && data.statusEffects.length > 0) {
                     const statusText = data.statusEffects
                         .map(s => `${s.name} (${s.duration})`)
                         .join(', ');
-                    fieldValue += `\n🔮 ${statusText}`;
+                    valueText += `\n🔮 ${statusText}`;
                 }
 
                 embed.addFields({
-                    name: `👤 ${data.characterName}`,
-                    value: fieldValue,
-                    inline: true
+                    name: data.characterName,
+                    value: valueText,
+                    inline: false
                 });
             }
+
+            embed.setFooter({ text: `${sortedPlayers.length} player(s) total` });
 
             await interaction.reply({ embeds: [embed] });
         } else if (commandName === 'clash') {
@@ -1576,6 +1847,7 @@ client.on('interactionCreate', async interaction => {
                 const combatantCount = activeEncounter.combatants.length;
                 activeEncounter.active = false;
                 activeEncounter.combatants = [];
+                activeEncounter.turnsTaken.clear();
                 saveData();
 
                 const embed = new EmbedBuilder()
@@ -1696,16 +1968,23 @@ client.on('interactionCreate', async interaction => {
                     return;
                 }
 
+                // Sort combatants alphabetically by character name
+                const sortedCombatants = activeEncounter.combatants
+                    .map(userId => ({ userId, data: playerData.get(userId) }))
+                    .filter(c => c.data) // Remove any missing data
+                    .sort((a, b) => a.data.characterName.localeCompare(b.data.characterName));
+
                 const embed = new EmbedBuilder()
                     .setColor(0xFFFFFF)
                     .setTitle('⚔️ Active Clash - Combatants')
                     .setTimestamp();
 
-                for (const userId of activeEncounter.combatants) {
-                    const data = playerData.get(userId);
-                    if (!data) continue;
-
-                    let valueText = `${RESOURCE_EMOJIS.HP} HP: ${data.HP}/${data.maxHP} | ${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP} | ${RESOURCE_EMOJIS.IP} IP: ${data.IP}/${data.maxIP} | ${RESOURCE_EMOJIS.Armor} Armor: ${data.Armor}/${data.maxArmor} | ${RESOURCE_EMOJIS.Barrier} Barrier: ${data.Barrier}/${data.maxBarrier}`;
+                for (const { userId, data } of sortedCombatants) {
+                    // Turn checkbox
+                    const turnDone = activeEncounter.turnsTaken.has(userId);
+                    const checkbox = turnDone ? '✅' : '⬜';
+                    
+                    let valueText = `${checkbox} ${RESOURCE_EMOJIS.HP} HP: ${data.HP}/${data.maxHP} | ${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP} | ${RESOURCE_EMOJIS.IP} IP: ${data.IP}/${data.maxIP} | ${RESOURCE_EMOJIS.Armor} Armor: ${data.Armor}/${data.maxArmor} | ${RESOURCE_EMOJIS.Barrier} Barrier: ${data.Barrier}/${data.maxBarrier}`;
                     
                     if (data.statusEffects && data.statusEffects.length > 0) {
                         const statusText = data.statusEffects
@@ -1721,10 +2000,171 @@ client.on('interactionCreate', async interaction => {
                     });
                 }
 
-                embed.setFooter({ text: `${activeEncounter.combatants.length} combatant(s) in clash` });
+                // Show turn progress
+                const totalCombatants = sortedCombatants.length;
+                const turnsDone = activeEncounter.turnsTaken.size;
+                embed.setFooter({ text: `${turnsDone}/${totalCombatants} turns complete | Use /eot to mark turn done` });
+
+                await interaction.reply({ embeds: [embed] });
+            
+            } else if (subcommand === 'init') {
+                if (!activeEncounter.active) {
+                    await interaction.reply('No active clash. Use `/clash start` to begin.');
+                    return;
+                }
+
+                if (activeEncounter.combatants.length === 0) {
+                    await interaction.reply('No combatants in the current clash. Use `/clash add` to add players.');
+                    return;
+                }
+
+                // Sort combatants alphabetically by character name
+                const sortedCombatants = activeEncounter.combatants
+                    .map(userId => ({ userId, data: playerData.get(userId) }))
+                    .filter(c => c.data)
+                    .sort((a, b) => a.data.characterName.localeCompare(b.data.characterName));
+
+                const embed = new EmbedBuilder()
+                    .setColor(0x00BFFF)
+                    .setTitle('🎯 Initiative Tracker')
+                    .setTimestamp();
+
+                let initText = '';
+                for (const { userId, data } of sortedCombatants) {
+                    const hasTaken = activeEncounter.turnsTaken.has(userId);
+                    const checkbox = hasTaken ? '✅' : '⬜';
+                    initText += `${checkbox} ${data.characterName}\n`;
+                }
+
+                const takenCount = activeEncounter.turnsTaken.size;
+                const totalCount = sortedCombatants.length;
+
+                embed.setDescription(initText);
+                embed.setFooter({ text: `${takenCount}/${totalCount} players have taken their turn` });
 
                 await interaction.reply({ embeds: [embed] });
             }
+
+        } else if (commandName === 'actionsave') {
+            const subcommand = interaction.options.getSubcommand();
+            const player = interaction.user;
+            const playerMember = interaction.member;
+
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+
+            if (subcommand === 'add') {
+                const actionName = interaction.options.getString('name').toLowerCase();
+                const type = interaction.options.getString('type');
+                const dice1 = interaction.options.getInteger('dice1');
+                const dice2 = interaction.options.getInteger('dice2');
+                const modifier = interaction.options.getInteger('modifier');
+                const mpCost = interaction.options.getInteger('mpcost') || 0;
+
+                // Validate: cast must have MP cost
+                if (type === 'cast' && mpCost === 0) {
+                    await interaction.reply({ content: 'Cast actions must have an MP cost! Use the `mpcost` parameter.', ephemeral: true });
+                    return;
+                }
+
+                // Save to player data
+                data.savedActions[actionName] = { type, dice1, dice2, modifier, mpCost };
+                saveData(); // Persist to database
+
+                const typeEmoji = type === 'attack' ? '⚔️' : '✨';
+                const typeLabel = type === 'attack' ? 'Attack' : 'Cast';
+                let description = `${typeEmoji} **${typeLabel}**: d${dice1}+d${dice2}, +${modifier} modifier`;
+                if (type === 'cast') {
+                    description += `\n💧 MP Cost: ${mpCost} (2nd: +10, 3rd+: +20)`;
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(0x00FF00)
+                    .setTitle('✅ Action Saved')
+                    .setDescription(`**/${actionName}**\n${description}`)
+                    .setFooter({ text: `Use /${actionName} to execute this action` })
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+
+            } else if (subcommand === 'list') {
+                if (!data.savedActions || Object.keys(data.savedActions).length === 0) {
+                    await interaction.reply({ content: 'You have no saved actions. Use `/actionsave add` to create one!', ephemeral: true });
+                    return;
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(0x0099FF)
+                    .setTitle('📋 Your Saved Actions')
+                    .setTimestamp();
+
+                let description = '';
+                for (const [name, action] of Object.entries(data.savedActions)) {
+                    const typeEmoji = action.type === 'attack' ? '⚔️' : '✨';
+                    description += `${typeEmoji} **/${name}** - d${action.dice1}+d${action.dice2}, +${action.modifier} mod`;
+                    if (action.type === 'cast') {
+                        description += ` (${action.mpCost} MP)`;
+                    }
+                    description += '\n';
+                }
+
+                embed.setDescription(description);
+                embed.setFooter({ text: `${Object.keys(data.savedActions).length} saved action(s)` });
+
+                await interaction.reply({ embeds: [embed] });
+
+            } else if (subcommand === 'delete') {
+                const actionName = interaction.options.getString('name').toLowerCase();
+
+                if (!data.savedActions || !data.savedActions[actionName]) {
+                    await interaction.reply({ content: `Action "${actionName}" not found.`, ephemeral: true });
+                    return;
+                }
+
+                delete data.savedActions[actionName];
+                saveData(); // Persist to database
+
+                const embed = new EmbedBuilder()
+                    .setColor(0xFF0000)
+                    .setTitle('🗑️ Action Deleted')
+                    .setDescription(`**/${actionName}** has been removed.`)
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+            }
+
+        } else if (commandName === 'eot') {
+            if (!activeEncounter.active) {
+                await interaction.reply({ content: 'No active clash. Use `/clash start` to begin.', ephemeral: true });
+                return;
+            }
+
+            const player = interaction.options.getUser('player') || interaction.user;
+            
+            // Check if player is in the clash
+            if (!activeEncounter.combatants.includes(player.id)) {
+                await interaction.reply({ content: `${player.username} is not in the active clash.`, ephemeral: true });
+                return;
+            }
+
+            const playerMember = await interaction.guild.members.fetch(player.id);
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+
+            // Mark turn as taken
+            activeEncounter.turnsTaken.add(player.id);
+
+            const embed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('✅ Turn Complete')
+                .setDescription(`**${data.characterName}** has finished their turn!`)
+                .setTimestamp();
+
+            const takenCount = activeEncounter.turnsTaken.size;
+            const totalCount = activeEncounter.combatants.length;
+            embed.setFooter({ text: `${takenCount}/${totalCount} players have taken their turn` });
+
+            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'guide') {
             const embed = new EmbedBuilder()
@@ -1744,7 +2184,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/turn` - New round! Refills Armor/Barrier, resets penalties (GM only)', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/round` - New round! Refills Armor/Barrier, resets penalties (GM only)', 
                         inline: false 
                     },
                     { 
@@ -1754,7 +2194,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '🎯 Penalty Details', 
-                        value: '**Gate +1**: Increases gate by 1 (stackable)\n**-50% Modifier**: Reduces modifier by 50% (stackable)\n**No Modifier**: Sets modifier to 0\n**Blind**: Sets gate to 3 (max, once only)\n\nPenalties are **cumulative** and persist until `/turn` or `/resetpenalty`', 
+                        value: '**Gate +1**: Increases gate by 1 (stackable)\n**-50% Modifier**: Reduces modifier by 50% (stackable)\n**No Modifier**: Sets modifier to 0\n**Blind**: Sets gate to 3 (max, once only)\n\nPenalties are **cumulative** and persist until `/round` or `/resetpenalty`', 
                         inline: false 
                     },
                     { 
@@ -1763,13 +2203,23 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     },
                     { 
+                        name: '🎯 Initiative Tracker', 
+                        value: '`/clash init` - Show who has taken their turn\n`/eot [@player]` - Mark end of turn (GM or self)\n`/round` - New round, resets all checkboxes', 
+                        inline: false 
+                    },
+                    { 
+                        name: '💾 Saved Actions', 
+                        value: '`/actionsave add <n> <type> <d1> <d2> <mod> [mpcost]` - Save action\n• Type: **attack** or **cast**\n• Cast requires MP cost\n`/actionsave list` - View all\n`/<actionname>` - Execute', 
+                        inline: false 
+                    },
+                    { 
                         name: '⚔️ Clash & GM Tools', 
-                        value: '`/clash start|end|add|remove|list` - Manage encounters\n`/resetpenalty <attack|cast> @player` - Reset penalties (GM)\n`/turn` - New round (GM only)', 
+                        value: '`/clash start|end|add|remove|list|init` - Manage encounters\n`/resetpenalty <attack|cast> @player` - Reset penalties (GM)\n`/round` - New round (GM only)', 
                         inline: false 
                     },
                     { 
                         name: '📝 Examples', 
-                        value: '`/attack 10 8 5` - 1st attack\n`/attack 10 8 5` - 2nd: Choose Gate +1 → Gate ≤2\n`/attack 10 8 5` - 3rd: Choose -50% Mod → Gate ≤2, Mod halved\n`/attack 10 8 5 blind` - Manual blind penalty', 
+                        value: '**Attack:** `/actionsave add sword attack 10 8 5`\n**Cast:** `/actionsave add fireball cast 10 8 15 20`\n**Use:** `/sword` or `/fireball`', 
                         inline: false 
                     }
                 )
