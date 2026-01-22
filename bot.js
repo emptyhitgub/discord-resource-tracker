@@ -141,7 +141,14 @@ async function loadData() {
             if (encounterResult.rows.length > 0) {
                 activeEncounter = {
                     active: encounterResult.rows[0].active,
-                    combatants: encounterResult.rows[0].combatants || []
+                    combatants: encounterResult.rows[0].combatants || [],
+                    turnsTaken: new Set() // Always initialize as Set
+                };
+            } else {
+                activeEncounter = {
+                    active: false,
+                    combatants: [],
+                    turnsTaken: new Set()
                 };
             }
 
@@ -156,7 +163,13 @@ async function loadData() {
                 const rawData = fs.readFileSync(DATA_FILE, 'utf8');
                 const parsed = JSON.parse(rawData);
                 playerData = new Map(Object.entries(parsed.players || parsed));
-                activeEncounter = parsed.encounter || { active: false, combatants: [] };
+                activeEncounter = parsed.encounter || { active: false, combatants: [], turnsTaken: new Set() };
+                // Ensure turnsTaken is a Set (in case loaded from JSON as array)
+                if (activeEncounter.turnsTaken && !activeEncounter.turnsTaken.has) {
+                    activeEncounter.turnsTaken = new Set(activeEncounter.turnsTaken);
+                } else if (!activeEncounter.turnsTaken) {
+                    activeEncounter.turnsTaken = new Set();
+                }
                 console.log(`Loaded data for ${playerData.size} players from ${DATA_FILE}`);
             } else {
                 console.log('No existing data file found. Starting fresh.');
@@ -607,6 +620,14 @@ const commands = [
                         .setRequired(true))),
 
     new SlashCommandBuilder()
+        .setName('use')
+        .setDescription('Use a saved action')
+        .addStringOption(option =>
+            option.setName('action')
+                .setDescription('Name of the saved action to use')
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
         .setName('eot')
         .setDescription('Mark turn as complete (End of Turn)')
         .addUserOption(option =>
@@ -714,202 +735,6 @@ client.on('interactionCreate', async interaction => {
     const { commandName } = interaction;
 
     try {
-        // Check if command is a saved action
-        const player = interaction.user;
-        const playerMember = interaction.member;
-        
-        initPlayer(player.id, playerMember.displayName);
-        const data = playerData.get(player.id);
-        
-        if (data.savedActions && data.savedActions[commandName]) {
-            const action = data.savedActions[commandName];
-            const characterName = data.characterName;
-
-            // Handle CAST type
-            if (action.type === 'cast') {
-                // Increment cast counter
-                const currentCount = (castCounters.get(player.id) || 0) + 1;
-                castCounters.set(player.id, currentCount);
-
-                // Calculate MP penalty
-                let mpPenaltyText = '';
-                if (currentCount === 2) {
-                    mpPenaltyText = 'Multi-Cast Penalty: Extra 10 MP';
-                } else if (currentCount >= 3) {
-                    mpPenaltyText = 'Multi-Cast Penalty: Extra 20 MP';
-                }
-
-                // Calculate final gate and modifier (no penalties for cast)
-                const gate = 1;
-                const finalModifier = action.modifier;
-
-                // Roll the dice
-                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
-                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
-                const total = roll1 + roll2;
-                const highRoll = Math.max(roll1, roll2);
-                const damage = highRoll + finalModifier;
-
-                // Determine hit/miss/fumble/crit
-                const isFumble = roll1 === 1 && roll2 === 1;
-                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-                // Build result text
-                let resultText = `> **${characterName}** ✨ (Cast #${currentCount}) - **${commandName}**\n`;
-                if (mpPenaltyText) {
-                    resultText += `> *${mpPenaltyText}*\n`;
-                }
-                resultText += `> \n`;
-                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
-                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-                resultText += `> \n`;
-                resultText += `> HighRoll = **${highRoll}**\n`;
-                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-                resultText += `> \n`;
-                
-                if (isFumble) {
-                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-                } else if (isCrit) {
-                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-                } else if (isHit) {
-                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-                } else {
-                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-                }
-
-                const embed = new EmbedBuilder()
-                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                    .setTitle(`🎲 Cast Roll`)
-                    .setDescription(resultText)
-                    .setFooter({ text: `💧 MP: ${data.MP}/${data.maxMP} | Base cost: ${action.mpCost} MP` })
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-                return;
-            }
-
-            // Handle ATTACK type
-            if (action.type === 'attack') {
-                // Increment attack counter
-                const currentCount = (attackCounters.get(player.id) || 0) + 1;
-                attackCounters.set(player.id, currentCount);
-
-                // Get current cumulative penalties
-                if (!attackPenalties.has(player.id)) {
-                    attackPenalties.set(player.id, { gate: 0, damageReduction: 0, blind: false });
-                }
-                const penalties = attackPenalties.get(player.id);
-
-                // Check if needs penalty prompt (2nd+ attack)
-                if (currentCount >= 2) {
-                    const row = new ActionRowBuilder()
-                        .addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_gate`)
-                                .setLabel('🎯 Gate +1')
-                                .setStyle(ButtonStyle.Primary),
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_damage50`)
-                                .setLabel('⚔️ -50% Modifier')
-                                .setStyle(ButtonStyle.Danger),
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_damage100`)
-                                .setLabel('⚔️ No Modifier')
-                                .setStyle(ButtonStyle.Danger),
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_attack_${player.id}_${action.dice1}_${action.dice2}_${action.modifier}_blind`)
-                                .setLabel('👁️ Blind (Gate 3)')
-                                .setStyle(ButtonStyle.Secondary)
-                                .setDisabled(penalties.blind)
-                        );
-
-                    let description = `**${characterName}** using **${commandName}**, choose ONE penalty to ADD:`;
-                    const currentPenaltiesText = [];
-                    if (penalties.blind) currentPenaltiesText.push(`Blind (Gate 3)`);
-                    else if (penalties.gate > 0) currentPenaltiesText.push(`Gate +${penalties.gate}`);
-                    if (penalties.damageReduction > 0) currentPenaltiesText.push(`Modifier -${penalties.damageReduction}%`);
-                    if (currentPenaltiesText.length > 0) {
-                        description += `\n\n**Current Penalties:** ${currentPenaltiesText.join(', ')}`;
-                    }
-
-                    const embed = new EmbedBuilder()
-                        .setColor(0xFFAA00)
-                        .setTitle(`⚠️ Multi-Attack Penalty (${currentCount}${currentCount === 2 ? 'nd' : currentCount === 3 ? 'rd' : 'th'} Attack)`)
-                        .setDescription(description)
-                        .addFields(
-                            { name: '🎯 Gate +1', value: 'Adds +1 to gate (cumulative)', inline: true },
-                            { name: '⚔️ -50% Modifier', value: 'Reduces modifier by 50%', inline: true },
-                            { name: '⚔️ No Modifier', value: 'Removes all modifier', inline: true },
-                            { name: '👁️ Blind', value: 'Sets gate to 3 (max, once only)', inline: true }
-                        )
-                        .setFooter({ text: `Attack #${currentCount} • Penalties are cumulative` })
-                        .setTimestamp();
-
-                    await interaction.reply({ embeds: [embed], components: [row] });
-                    return;
-                }
-
-                // Calculate final gate and modifier with cumulative penalties
-                const gate = penalties.blind ? 3 : (1 + penalties.gate);
-                const damageMultiplier = Math.max(0, 1 - (penalties.damageReduction / 100));
-                const finalModifier = Math.floor(action.modifier * damageMultiplier);
-
-                // Roll the dice
-                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
-                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
-                const total = roll1 + roll2;
-                const highRoll = Math.max(roll1, roll2);
-                const damage = highRoll + finalModifier;
-
-                // Determine hit/miss/fumble/crit
-                const isFumble = roll1 === 1 && roll2 === 1;
-                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-                // Build result text
-                let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount}) - **${commandName}**\n`;
-                if (penalties.gate > 0 || penalties.damageReduction > 0 || penalties.blind) {
-                    const penaltyTexts = [];
-                    if (penalties.blind) penaltyTexts.push(`Blind (Gate 3)`);
-                    else if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
-                    if (penalties.damageReduction > 0) penaltyTexts.push(`Modifier -${penalties.damageReduction}%`);
-                    resultText += `> *Cumulative Penalties: ${penaltyTexts.join(', ')}*\n`;
-                }
-                resultText += `> \n`;
-                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
-                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-                resultText += `> \n`;
-                resultText += `> HighRoll = **${highRoll}**\n`;
-                if (penalties.damageReduction > 0) {
-                    resultText += `> Original: HR + ${action.modifier}\n`;
-                    resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
-                } else {
-                    resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-                }
-                resultText += `> \n`;
-                
-                if (isFumble) {
-                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-                } else if (isCrit) {
-                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-                } else if (isHit) {
-                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-                } else {
-                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-                }
-
-                const embed = new EmbedBuilder()
-                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                    .setTitle(`🎲 Attack Roll`)
-                    .setDescription(resultText)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-                return; // Exit early, don't check other commands
-            } // End of attack type handling
-        } // End of saved action check
-
         if (commandName === 'set') {
             const player = interaction.options.getUser('player');
             const playerMember = await interaction.guild.members.fetch(player.id);
@@ -1828,6 +1653,7 @@ client.on('interactionCreate', async interaction => {
 
                 activeEncounter.active = true;
                 activeEncounter.combatants = [];
+                activeEncounter.turnsTaken = new Set(); // Initialize turn tracker
                 saveData();
 
                 const embed = new EmbedBuilder()
@@ -2133,6 +1959,193 @@ client.on('interactionCreate', async interaction => {
                 await interaction.reply({ embeds: [embed] });
             }
 
+        } else if (commandName === 'use') {
+            const actionName = interaction.options.getString('action').toLowerCase();
+            const player = interaction.user;
+            const playerMember = interaction.member;
+            
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+            
+            if (!data.savedActions || !data.savedActions[actionName]) {
+                await interaction.reply({ content: `Action "${actionName}" not found. Use \`/actionsave list\` to see your saved actions.`, ephemeral: true });
+                return;
+            }
+            
+            const action = data.savedActions[actionName];
+            const characterName = data.characterName;
+
+            // Handle CAST type
+            if (action.type === 'cast') {
+                const currentCount = (castCounters.get(player.id) || 0) + 1;
+                castCounters.set(player.id, currentCount);
+
+                let mpPenaltyText = '';
+                if (currentCount === 2) {
+                    mpPenaltyText = 'Multi-Cast Penalty: Extra 10 MP';
+                } else if (currentCount >= 3) {
+                    mpPenaltyText = 'Multi-Cast Penalty: Extra 20 MP';
+                }
+
+                const gate = 1;
+                const finalModifier = action.modifier;
+
+                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
+                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
+                const total = roll1 + roll2;
+                const highRoll = Math.max(roll1, roll2);
+                const damage = highRoll + finalModifier;
+
+                const isFumble = roll1 === 1 && roll2 === 1;
+                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+                let resultText = `> **${characterName}** ✨ (Cast #${currentCount}) - **${actionName}**\n`;
+                if (mpPenaltyText) {
+                    resultText += `> *${mpPenaltyText}*\n`;
+                }
+                resultText += `> \n`;
+                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
+                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+                resultText += `> \n`;
+                resultText += `> HighRoll = **${highRoll}**\n`;
+                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+                resultText += `> \n`;
+                
+                if (isFumble) {
+                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+                } else if (isCrit) {
+                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
+                } else if (isHit) {
+                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+                } else {
+                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+                    .setTitle(`🎲 Cast Roll`)
+                    .setDescription(resultText)
+                    .setFooter({ text: `💧 MP: ${data.MP}/${data.maxMP} | Base cost: ${action.mpCost} MP` })
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+                return;
+            }
+
+            // Handle ATTACK type
+            if (action.type === 'attack') {
+                const currentCount = (attackCounters.get(player.id) || 0) + 1;
+                attackCounters.set(player.id, currentCount);
+
+                if (!attackPenalties.has(player.id)) {
+                    attackPenalties.set(player.id, { gate: 0, damageReduction: 0, blind: false });
+                }
+                const penalties = attackPenalties.get(player.id);
+
+                if (currentCount >= 2) {
+                    const row = new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_gate`)
+                                .setLabel('🎯 Gate +1')
+                                .setStyle(ButtonStyle.Primary),
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_damage50`)
+                                .setLabel('⚔️ -50% Modifier')
+                                .setStyle(ButtonStyle.Danger),
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_damage100`)
+                                .setLabel('⚔️ No Modifier')
+                                .setStyle(ButtonStyle.Danger),
+                            new ButtonBuilder()
+                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_blind`)
+                                .setLabel('👁️ Blind (Gate 3)')
+                                .setStyle(ButtonStyle.Secondary)
+                                .setDisabled(penalties.blind)
+                        );
+
+                    let description = `**${characterName}** using **${actionName}**, choose ONE penalty to ADD:`;
+                    const currentPenaltiesText = [];
+                    if (penalties.blind) currentPenaltiesText.push(`Blind (Gate 3)`);
+                    else if (penalties.gate > 0) currentPenaltiesText.push(`Gate +${penalties.gate}`);
+                    if (penalties.damageReduction > 0) currentPenaltiesText.push(`Modifier -${penalties.damageReduction}%`);
+                    if (currentPenaltiesText.length > 0) {
+                        description += `\n\n**Current Penalties:** ${currentPenaltiesText.join(', ')}`;
+                    }
+
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFFAA00)
+                        .setTitle(`⚠️ Multi-Attack Penalty (${currentCount}${currentCount === 2 ? 'nd' : currentCount === 3 ? 'rd' : 'th'} Attack)`)
+                        .setDescription(description)
+                        .addFields(
+                            { name: '🎯 Gate +1', value: 'Adds +1 to gate (cumulative)', inline: true },
+                            { name: '⚔️ -50% Modifier', value: 'Reduces modifier by 50%', inline: true },
+                            { name: '⚔️ No Modifier', value: 'Removes all modifier', inline: true },
+                            { name: '👁️ Blind', value: 'Sets gate to 3 (max, once only)', inline: true }
+                        )
+                        .setFooter({ text: `Attack #${currentCount} • Penalties are cumulative` })
+                        .setTimestamp();
+
+                    await interaction.reply({ embeds: [embed], components: [row] });
+                    return;
+                }
+
+                const gate = penalties.blind ? 3 : (1 + penalties.gate);
+                const damageMultiplier = Math.max(0, 1 - (penalties.damageReduction / 100));
+                const finalModifier = Math.floor(action.modifier * damageMultiplier);
+
+                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
+                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
+                const total = roll1 + roll2;
+                const highRoll = Math.max(roll1, roll2);
+                const damage = highRoll + finalModifier;
+
+                const isFumble = roll1 === 1 && roll2 === 1;
+                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+                let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount}) - **${actionName}**\n`;
+                if (penalties.gate > 0 || penalties.damageReduction > 0 || penalties.blind) {
+                    const penaltyTexts = [];
+                    if (penalties.blind) penaltyTexts.push(`Blind (Gate 3)`);
+                    else if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
+                    if (penalties.damageReduction > 0) penaltyTexts.push(`Modifier -${penalties.damageReduction}%`);
+                    resultText += `> *Cumulative Penalties: ${penaltyTexts.join(', ')}*\n`;
+                }
+                resultText += `> \n`;
+                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
+                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+                resultText += `> \n`;
+                resultText += `> HighRoll = **${highRoll}**\n`;
+                if (penalties.damageReduction > 0) {
+                    resultText += `> Original: HR + ${action.modifier}\n`;
+                    resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
+                } else {
+                    resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+                }
+                resultText += `> \n`;
+                
+                if (isFumble) {
+                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+                } else if (isCrit) {
+                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
+                } else if (isHit) {
+                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+                } else {
+                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+                    .setTitle(`🎲 Attack Roll`)
+                    .setDescription(resultText)
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+                return;
+            }
+
         } else if (commandName === 'eot') {
             if (!activeEncounter.active) {
                 await interaction.reply({ content: 'No active clash. Use `/clash start` to begin.', ephemeral: true });
@@ -2209,7 +2222,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '💾 Saved Actions', 
-                        value: '`/actionsave add <n> <type> <d1> <d2> <mod> [mpcost]` - Save action\n• Type: **attack** or **cast**\n• Cast requires MP cost\n`/actionsave list` - View all\n`/<actionname>` - Execute', 
+                        value: '`/actionsave add <n> <type> <d1> <d2> <mod> [mpcost]` - Save action\n• Type: **attack** or **cast**\n`/use <name>` - Execute saved action\n`/actionsave list` - View all', 
                         inline: false 
                     },
                     { 
@@ -2218,7 +2231,7 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     },
                     { 
-                        name: '📝 Examples', 
+                        value: '**Attack:** `/actionsave add sword attack 10 8 5`\n**Cast:** `/actionsave add fireball cast 10 8 15 20`\n**Use:** `/use sword` or `/use fireball`', 
                         value: '**Attack:** `/actionsave add sword attack 10 8 5`\n**Cast:** `/actionsave add fireball cast 10 8 15 20`\n**Use:** `/sword` or `/fireball`', 
                         inline: false 
                     }
@@ -2238,21 +2251,27 @@ client.on('interactionCreate', async interaction => {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isButton()) return;
 
-    const [action, type, userId, dice1Str, dice2Str, modifierStr, penalty] = interaction.customId.split('_');
+    const parts = interaction.customId.split('_');
+    const action = parts[0];
+    const type = parts[1];
     
-    if (action !== 'penalty' || type !== 'attack') return;
+    if (action !== 'penalty') return;
+    
+    // Handle both "penalty_attack_..." and "penalty_use_..." formats
+    if (type === 'attack') {
+        const [, , userId, dice1Str, dice2Str, modifierStr, penalty] = parts;
+        
+        // Only the player can click their penalty buttons
+        if (interaction.user.id !== userId) {
+            await interaction.reply({ content: 'This is not your penalty choice!', ephemeral: true });
+            return;
+        }
 
-    // Only the player can click their penalty buttons
-    if (interaction.user.id !== userId) {
-        await interaction.reply({ content: 'This is not your penalty choice!', ephemeral: true });
-        return;
-    }
+        const dice1 = parseInt(dice1Str);
+        const dice2 = parseInt(dice2Str);
+        const modifier = parseInt(modifierStr);
 
-    const dice1 = parseInt(dice1Str);
-    const dice2 = parseInt(dice2Str);
-    const modifier = parseInt(modifierStr);
-
-    initPlayer(userId, interaction.member.displayName);
+        initPlayer(userId, interaction.member.displayName);
     const data = playerData.get(userId);
     const characterName = data.characterName;
 
@@ -2328,6 +2347,92 @@ client.on('interactionCreate', async interaction => {
         .setTimestamp();
 
     await interaction.update({ embeds: [embed], components: [] });
+    
+    } else if (type === 'use') {
+        const [, , userId, actionName, dice1Str, dice2Str, modifierStr, penalty] = parts;
+        
+        // Only the player can click their penalty buttons
+        if (interaction.user.id !== userId) {
+            await interaction.reply({ content: 'This is not your penalty choice!', ephemeral: true });
+            return;
+        }
+
+        const dice1 = parseInt(dice1Str);
+        const dice2 = parseInt(dice2Str);
+        const modifier = parseInt(modifierStr);
+
+        initPlayer(userId, interaction.member.displayName);
+        const data = playerData.get(userId);
+        const characterName = data.characterName;
+
+        const currentCount = attackCounters.get(userId);
+
+        const penalties = attackPenalties.get(userId);
+        if (penalty === 'gate') {
+            penalties.gate += 1;
+        } else if (penalty === 'damage50') {
+            penalties.damageReduction += 50;
+        } else if (penalty === 'damage100') {
+            penalties.damageReduction += 100;
+        } else if (penalty === 'blind') {
+            penalties.blind = true;
+        }
+
+        let gate = penalties.blind ? 3 : (1 + penalties.gate);
+        let damageMultiplier = 1 - (penalties.damageReduction / 100);
+        const finalModifier = Math.floor(modifier * damageMultiplier);
+
+        const cumulativeParts = [];
+        if (penalties.blind) cumulativeParts.push(`Blind (Gate 3)`);
+        else if (penalties.gate > 0) cumulativeParts.push(`Gate +${penalties.gate}`);
+        if (penalties.damageReduction > 0) cumulativeParts.push(`Modifier -${penalties.damageReduction}%`);
+        const cumulativeText = cumulativeParts.join(', ');
+
+        const roll1 = Math.floor(Math.random() * dice1) + 1;
+        const roll2 = Math.floor(Math.random() * dice2) + 1;
+        const total = roll1 + roll2;
+        const highRoll = Math.max(roll1, roll2);
+        const damage = highRoll + finalModifier;
+
+        const isFumble = roll1 === 1 && roll2 === 1;
+        const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+        const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+        let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount}) - **${actionName}**\n`;
+        if (cumulativeText) {
+            resultText += `> *Cumulative Penalties: ${cumulativeText}*\n`;
+        }
+        resultText += `> \n`;
+        resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
+        resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+        resultText += `> \n`;
+        resultText += `> HighRoll = **${highRoll}**\n`;
+        if (penalties.damageReduction > 0) {
+            resultText += `> Original: HR + ${modifier}\n`;
+            resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
+        } else {
+            resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+        }
+        resultText += `> \n`;
+        
+        if (isFumble) {
+            resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+        } else if (isCrit) {
+            resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
+        } else if (isHit) {
+            resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+        } else {
+            resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
+            .setTitle(`🎲 Attack Roll`)
+            .setDescription(resultText)
+            .setTimestamp();
+
+        await interaction.update({ embeds: [embed], components: [] });
+    }
 });
 
 // Login to Discord
