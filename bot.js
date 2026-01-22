@@ -642,19 +642,20 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('resetpenalty')
-        .setDescription('Reset attack or cast penalty for a player (GM only)')
+        .setDescription('Reset penalties (defaults to both attack & cast for yourself)')
         .addStringOption(option =>
             option.setName('type')
-                .setDescription('Which penalty to reset')
-                .setRequired(true)
+                .setDescription('Which penalty to reset (default: both)')
+                .setRequired(false)
                 .addChoices(
                     { name: 'Attack', value: 'attack' },
-                    { name: 'Cast', value: 'cast' }
+                    { name: 'Cast', value: 'cast' },
+                    { name: 'Both', value: 'both' }
                 ))
         .addUserOption(option =>
             option.setName('player')
-                .setDescription('Player to reset penalties for')
-                .setRequired(true))
+                .setDescription('Player to reset (default: yourself)')
+                .setRequired(false))
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new SlashCommandBuilder()
@@ -1544,25 +1545,38 @@ client.on('interactionCreate', async interaction => {
             });
 
         } else if (commandName === 'resetpenalty') {
-            const type = interaction.options.getString('type');
-            const player = interaction.options.getUser('player');
+            const type = interaction.options.getString('type') || 'both'; // Default to both
+            const player = interaction.options.getUser('player') || interaction.user; // Default to self
 
-            if (type === 'attack') {
+            // Reset based on type
+            if (type === 'attack' || type === 'both') {
                 attackCounters.delete(player.id);
                 attackPenalties.delete(player.id);
-            } else if (type === 'cast') {
+            }
+            
+            if (type === 'cast' || type === 'both') {
                 castCounters.delete(player.id);
                 castPenalties.delete(player.id);
             }
 
-            const playerMember = await interaction.guild.members.fetch(player.id);
+            const playerMember = player.id === interaction.user.id 
+                ? interaction.member 
+                : await interaction.guild.members.fetch(player.id);
             initPlayer(player.id, playerMember.displayName);
             const data = playerData.get(player.id);
+
+            // Build description based on what was reset
+            let resetDescription;
+            if (type === 'both') {
+                resetDescription = `**${data.characterName}**'s attack and cast penalties have been reset to 0.`;
+            } else {
+                resetDescription = `**${data.characterName}**'s ${type} penalty and counter have been reset to 0.`;
+            }
 
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle('✅ Penalty Reset')
-                .setDescription(`**${data.characterName}**'s ${type} penalty and counter have been reset to 0.`)
+                .setDescription(resetDescription)
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
@@ -2227,7 +2241,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '⚔️ Clash & GM Tools', 
-                        value: '`/clash start|end|add|remove|list|init` - Manage encounters\n`/resetpenalty <attack|cast> @player` - Reset penalties (GM)\n`/round` - New round (GM only)', 
+                        value: '`/clash start|end|add|remove|list|init` - Manage encounters\n`/resetpenalty [type] [@player]` - Reset penalties (defaults to both, self)\n`/round` - New round (GM only)', 
                         inline: false 
                     },
                     { 
