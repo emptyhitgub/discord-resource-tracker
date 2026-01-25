@@ -464,7 +464,6 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new SlashCommandBuilder()
-    new SlashCommandBuilder()
         .setName('viewall')
         .setDescription('View all players and their resources in detail'),
 
