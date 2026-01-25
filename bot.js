@@ -2144,6 +2144,9 @@ client.on('interactionCreate', async interaction => {
             }
 
         } else if (commandName === 'gmattack') {
+            // Defer reply immediately to prevent timeout
+            await interaction.deferReply();
+
             const dice1 = interaction.options.getInteger('dice1');
             const dice2 = interaction.options.getInteger('dice2');
             const modifier = interaction.options.getInteger('modifier');
@@ -2206,7 +2209,7 @@ client.on('interactionCreate', async interaction => {
                     .setDescription(resultText)
                     .setTimestamp();
 
-                await interaction.reply({ embeds: [embed] });
+                await interaction.editReply({ embeds: [embed] });
                 return;
             } else if (isCrit) {
                 resultText += `> ⭐ **CRITICAL!** (Auto-Hit)`;
@@ -2222,7 +2225,7 @@ client.on('interactionCreate', async interaction => {
                     .setDescription(resultText)
                     .setTimestamp();
 
-                await interaction.reply({ embeds: [embed] });
+                await interaction.editReply({ embeds: [embed] });
                 return;
             }
 
@@ -2239,14 +2242,29 @@ client.on('interactionCreate', async interaction => {
                 .setFooter({ text: `${damage} ${damageType} damage incoming!` })
                 .setTimestamp();
 
+            // Batch fetch all members at once (prevents rate limiting)
+            const memberPromises = targetIds.map(id => 
+                interaction.guild.members.fetch(id).catch(err => {
+                    console.error(`Failed to fetch member ${id}:`, err);
+                    return null;
+                })
+            );
+            const members = await Promise.all(memberPromises);
+
             // Create defend buttons for each target
             const rows = [];
+            const targetPings = []; // For pinging
+            
             for (let i = 0; i < targetIds.length; i += 5) { // Max 5 buttons per row
                 const row = new ActionRowBuilder();
                 const chunk = targetIds.slice(i, i + 5);
                 
-                for (const targetId of chunk) {
-                    const targetMember = await interaction.guild.members.fetch(targetId);
+                for (let j = 0; j < chunk.length; j++) {
+                    const targetId = chunk[j];
+                    const targetMember = members[i + j];
+                    
+                    if (!targetMember) continue; // Skip if member not found
+                    
                     initPlayer(targetId, targetMember.displayName);
                     const targetData = playerData.get(targetId);
                     
@@ -2257,11 +2275,16 @@ client.on('interactionCreate', async interaction => {
                             .setStyle(ButtonStyle.Primary)
                             .setEmoji('🛡️')
                     );
+                    
+                    targetPings.push(`<@${targetId}>`); // Add ping
                 }
-                rows.push(row);
+                if (row.components.length > 0) {
+                    rows.push(row);
+                }
             }
 
-            await interaction.reply({
+            await interaction.editReply({
+                content: `${targetPings.join(' ')} ⚔️ **INCOMING ATTACK!**`, // Ping all targets
                 embeds: [embed],
                 components: rows
             });
