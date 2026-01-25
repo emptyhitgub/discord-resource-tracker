@@ -464,9 +464,6 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new SlashCommandBuilder()
-        .setName('listall')
-        .setDescription('List all players and their resources'),
-
     new SlashCommandBuilder()
         .setName('viewall')
         .setDescription('View all players and their resources in detail'),
@@ -626,6 +623,47 @@ const commands = [
             option.setName('action')
                 .setDescription('Name of the saved action to use')
                 .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('gmattack')
+        .setDescription('GM attack with instant damage application (GM only)')
+        .addIntegerOption(option =>
+            option.setName('dice1')
+                .setDescription('First dice size (e.g., 10 for d10)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('dice2')
+                .setDescription('Second dice size (e.g., 8 for d8)')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('modifier')
+                .setDescription('Damage modifier')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('penalty')
+                .setDescription('Optional penalty (no stacking)')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Gate 1', value: 'gate1' },
+                    { name: 'Gate 2', value: 'gate2' },
+                    { name: 'Gate 3', value: 'gate3' },
+                    { name: '-50% Modifier', value: 'mod50' },
+                    { name: 'No Modifier', value: 'mod100' }
+                ))
+        .addStringOption(option =>
+            option.setName('targets')
+                .setDescription('Target players (mention: @player1 @player2)')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('damage_type')
+                .setDescription('Damage type (default: armor)')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Armor', value: 'armor' },
+                    { name: 'Barrier', value: 'barrier' },
+                    { name: 'True Damage (HP)', value: 'true' }
+                ))
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new SlashCommandBuilder()
         .setName('eot')
@@ -1565,45 +1603,6 @@ client.on('interactionCreate', async interaction => {
 
             await interaction.reply({ embeds: [embed] });
 
-        } else if (commandName === 'listall') {
-            if (!activeEncounter.active) {
-                await interaction.reply('No active encounter. Use `/startencounter` to begin.');
-                return;
-            }
-
-            if (activeEncounter.combatants.length === 0) {
-                await interaction.reply('No combatants in the current encounter. Use `/addcombatant` to add players.');
-                return;
-            }
-
-            const embed = new EmbedBuilder()
-                .setColor(0xFFFFFF)
-                .setTitle('⚔️ Active Encounter - Combatants')
-                .setTimestamp();
-
-            for (const userId of activeEncounter.combatants) {
-                const data = playerData.get(userId);
-                if (!data) continue;
-
-                let valueText = `${RESOURCE_EMOJIS.HP} HP: ${data.HP}/${data.maxHP} | ${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP} | ${RESOURCE_EMOJIS.IP} IP: ${data.IP}/${data.maxIP} | ${RESOURCE_EMOJIS.Armor} Armor: ${data.Armor}/${data.maxArmor} | ${RESOURCE_EMOJIS.Barrier} Barrier: ${data.Barrier}/${data.maxBarrier}`;
-                
-                if (data.statusEffects && data.statusEffects.length > 0) {
-                    const statusText = data.statusEffects
-                        .map(s => `${s.name} (${s.duration})`)
-                        .join(', ');
-                    valueText += `\n🔮 ${statusText}`;
-                }
-
-                embed.addFields({
-                    name: data.characterName,
-                    value: valueText,
-                    inline: false
-                });
-            }
-
-            embed.setFooter({ text: `${activeEncounter.combatants.length} combatant(s) in encounter` });
-
-            await interaction.reply({ embeds: [embed] });
         } else if (commandName === 'viewall') {
             if (playerData.size === 0) {
                 await interaction.reply('No player data available yet.');
@@ -2144,6 +2143,129 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
+        } else if (commandName === 'gmattack') {
+            const dice1 = interaction.options.getInteger('dice1');
+            const dice2 = interaction.options.getInteger('dice2');
+            const modifier = interaction.options.getInteger('modifier');
+            const penalty = interaction.options.getString('penalty');
+            const targetsString = interaction.options.getString('targets');
+            const damageType = interaction.options.getString('damage_type') || 'armor';
+
+            // Parse gate from penalty
+            let gate = 1;
+            let finalModifier = modifier;
+            
+            if (penalty === 'gate2') gate = 2;
+            else if (penalty === 'gate3') gate = 3;
+            else if (penalty === 'mod50') finalModifier = Math.floor(modifier * 0.5);
+            else if (penalty === 'mod100') finalModifier = 0;
+
+            // Roll dice
+            const roll1 = Math.floor(Math.random() * dice1) + 1;
+            const roll2 = Math.floor(Math.random() * dice2) + 1;
+            const total = roll1 + roll2;
+            const highRoll = Math.max(roll1, roll2);
+            const damage = highRoll + finalModifier;
+
+            // Determine hit/miss/fumble/crit
+            const isFumble = roll1 === 1 && roll2 === 1;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+            const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+
+            // Parse targets
+            const targetMatches = targetsString.match(/<@!?(\d+)>/g) || [];
+            const targetIds = targetMatches.map(match => match.match(/\d+/)[0]);
+
+            if (targetIds.length === 0) {
+                await interaction.reply({ content: 'No valid targets found. Please mention players with @player.', ephemeral: true });
+                return;
+            }
+
+            // Build initial result
+            let resultText = `> **GM Attack** ⚔️\n`;
+            resultText += `> \n`;
+            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
+            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+            resultText += `> \n`;
+            resultText += `> HighRoll = **${highRoll}**\n`;
+            if (penalty === 'mod50' || penalty === 'mod100') {
+                resultText += `> Original: HR + ${modifier}\n`;
+                resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
+            } else {
+                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
+            }
+            resultText += `> \n`;
+            
+            if (isFumble) {
+                resultText += `> 💀 **FUMBLE!** (Auto-Miss)\n`;
+                resultText += `> No damage dealt.`;
+                
+                const embed = new EmbedBuilder()
+                    .setColor(0x800000)
+                    .setTitle('🎲 GM Attack')
+                    .setDescription(resultText)
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+                return;
+            } else if (isCrit) {
+                resultText += `> ⭐ **CRITICAL!** (Auto-Hit)`;
+            } else if (isHit) {
+                resultText += `> ✅ **HIT** (Both dice > ${gate})`;
+            } else {
+                resultText += `> ❌ **MISS** (At least one die ≤ ${gate})\n`;
+                resultText += `> No damage dealt.`;
+                
+                const embed = new EmbedBuilder()
+                    .setColor(0xFF0000)
+                    .setTitle('🎲 GM Attack')
+                    .setDescription(resultText)
+                    .setTimestamp();
+
+                await interaction.reply({ embeds: [embed] });
+                return;
+            }
+
+            // Attack hit - offer defend option to each target
+            const embed = new EmbedBuilder()
+                .setColor(isCrit ? 0xFFD700 : 0x00FF00)
+                .setTitle('🎲 GM Attack - HIT!')
+                .setDescription(resultText)
+                .addFields({
+                    name: 'Targets',
+                    value: targetMatches.join(' '),
+                    inline: false
+                })
+                .setFooter({ text: `${damage} ${damageType} damage incoming!` })
+                .setTimestamp();
+
+            // Create defend buttons for each target
+            const rows = [];
+            for (let i = 0; i < targetIds.length; i += 5) { // Max 5 buttons per row
+                const row = new ActionRowBuilder();
+                const chunk = targetIds.slice(i, i + 5);
+                
+                for (const targetId of chunk) {
+                    const targetMember = await interaction.guild.members.fetch(targetId);
+                    initPlayer(targetId, targetMember.displayName);
+                    const targetData = playerData.get(targetId);
+                    
+                    row.addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`defend_${targetId}_${damage}_${damageType}`)
+                            .setLabel(`${targetData.characterName}: DEFEND?`)
+                            .setStyle(ButtonStyle.Primary)
+                            .setEmoji('🛡️')
+                    );
+                }
+                rows.push(row);
+            }
+
+            await interaction.reply({
+                embeds: [embed],
+                components: rows
+            });
+
         } else if (commandName === 'eot') {
             if (!activeEncounter.active) {
                 await interaction.reply({ content: 'No active clash. Use `/clash start` to begin.', ephemeral: true });
@@ -2225,7 +2347,7 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '⚔️ Clash & GM Tools', 
-                        value: '`/clash start|end|add|remove|list|init` - Manage encounters\n`/resetpenalty [type] [@player]` - Reset penalties (defaults to both, self)\n`/round` - New round (GM only)', 
+                        value: '`/clash start|end|add|remove|list|init` - Manage encounters\n`/gmattack <d1> <d2> <mod> <targets>` - GM attack with defend option (GM)\n`/resetpenalty [type] [@player]` - Reset penalties (GM)\n`/round` - New round (GM only)', 
                         inline: false 
                     },
                     { 
@@ -2251,6 +2373,73 @@ client.on('interactionCreate', async interaction => {
 
     const parts = interaction.customId.split('_');
     const action = parts[0];
+    
+    // Handle defend buttons
+    if (action === 'defend') {
+        const [, targetId, damageStr, damageType] = parts;
+        const damage = parseInt(damageStr);
+        
+        // Only the target can click their defend button
+        if (interaction.user.id !== targetId) {
+            await interaction.reply({ content: 'This is not your defend button!', ephemeral: true });
+            return;
+        }
+
+        initPlayer(targetId, interaction.member.displayName);
+        const data = playerData.get(targetId);
+
+        // Apply defend: restore armor and barrier to max
+        data.Armor = data.maxArmor;
+        data.Barrier = data.maxBarrier;
+
+        // Now apply damage
+        let damageResult = '';
+        if (damageType === 'true') {
+            // True damage - direct to HP
+            data.HP = Math.max(0, data.HP - damage);
+            damageResult = `💔 ${damage} true damage → HP: ${data.HP}/${data.maxHP}`;
+        } else if (damageType === 'armor') {
+            // Armor damage
+            const armorDamage = Math.min(damage, data.Armor);
+            const overflowDamage = Math.max(0, damage - data.Armor);
+            data.Armor = Math.max(0, data.Armor - damage);
+            
+            if (overflowDamage > 0) {
+                data.HP = Math.max(0, data.HP - overflowDamage);
+                damageResult = `🛡️ Armor: ${data.maxArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${data.HP}/${data.maxHP}`;
+            } else {
+                damageResult = `🛡️ Armor: ${data.maxArmor} → ${data.Armor} (-${armorDamage})`;
+            }
+        } else if (damageType === 'barrier') {
+            // Barrier damage
+            const barrierDamage = Math.min(damage, data.Barrier);
+            const overflowDamage = Math.max(0, damage - data.Barrier);
+            data.Barrier = Math.max(0, data.Barrier - damage);
+            
+            if (overflowDamage > 0) {
+                data.HP = Math.max(0, data.HP - overflowDamage);
+                damageResult = `💎 Barrier: ${data.maxBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${data.HP}/${data.maxHP}`;
+            } else {
+                damageResult = `💎 Barrier: ${data.maxBarrier} → ${data.Barrier} (-${barrierDamage})`;
+            }
+        }
+
+        await saveData();
+
+        const embed = new EmbedBuilder()
+            .setColor(0x0099FF)
+            .setTitle('🛡️ DEFENDED!')
+            .setDescription(`**${data.characterName}** raised their guard!\n\n🛡️ Armor restored: ${data.maxArmor}\n💎 Barrier restored: ${data.maxBarrier}\n\n${damageResult}`)
+            .setTimestamp();
+
+        await interaction.update({ 
+            embeds: [embed],
+            components: [] // Remove buttons
+        });
+
+        return;
+    }
+    
     const type = parts[1];
     
     if (action !== 'penalty') return;
