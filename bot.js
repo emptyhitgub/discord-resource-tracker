@@ -639,6 +639,10 @@ const commands = [
                 .setDescription('Damage modifier')
                 .setRequired(true))
         .addStringOption(option =>
+            option.setName('targets')
+                .setDescription('Target players (mention: @player1 @player2)')
+                .setRequired(true))
+        .addStringOption(option =>
             option.setName('penalty')
                 .setDescription('Optional penalty (no stacking)')
                 .setRequired(false)
@@ -649,10 +653,6 @@ const commands = [
                     { name: '-50% Modifier', value: 'mod50' },
                     { name: 'No Modifier', value: 'mod100' }
                 ))
-        .addStringOption(option =>
-            option.setName('targets')
-                .setDescription('Target players (mention: @player1 @player2)')
-                .setRequired(true))
         .addStringOption(option =>
             option.setName('damage_type')
                 .setDescription('Damage type (default: armor)')
