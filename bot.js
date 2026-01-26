@@ -679,8 +679,12 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new SlashCommandBuilder()
-        .setName('ac')
-        .setDescription('Clear your Armor and Barrier to 0'),
+        .setName('turn')
+        .setDescription('Clear Armor and Barrier to 0 (defaults to yourself)')
+        .addUserOption(option =>
+            option.setName('player')
+                .setDescription('Player to reset (default: yourself)')
+                .setRequired(false)),
 
     new SlashCommandBuilder()
         .setName('defend')
@@ -1580,14 +1584,14 @@ client.on('interactionCreate', async interaction => {
                 embeds: [embed] 
             });
 
-        } else if (commandName === 'ac') {
-            await interaction.deferReply();
-            
-            const player = interaction.user;
-            const playerMember = interaction.member;
+        } else if (commandName === 'turn') {
+            const targetUser = interaction.options.getUser('player') || interaction.user;
+            const targetMember = targetUser.id === interaction.user.id 
+                ? interaction.member 
+                : await interaction.guild.members.fetch(targetUser.id);
 
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
+            initPlayer(targetUser.id, targetMember.displayName);
+            const data = playerData.get(targetUser.id);
 
             data.Armor = 0;
             data.Barrier = 0;
@@ -1596,11 +1600,11 @@ client.on('interactionCreate', async interaction => {
 
             const embed = new EmbedBuilder()
                 .setColor(0xFF6B6B)
-                .setTitle('💨 Armor & Barrier Cleared')
+                .setTitle('💨 Turn Reset')
                 .setDescription(`**${data.characterName}**'s protections cleared!\n\n💥 Armor: 0\n🛡️ Barrier: 0`)
                 .setTimestamp();
 
-            await interaction.editReply({ embeds: [embed] });
+            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'defend') {
             await interaction.deferReply();
@@ -2368,12 +2372,12 @@ client.on('interactionCreate', async interaction => {
                     },
                     { 
                         name: '⚡ Quick Updates', 
-                        value: '`/hp <amount|full|zero>` - Update HP\n`/mp`, `/ip`, `/armor`, `/barrier` - Same for other resources\n`/rest` - Restore HP/MP/Armor/Barrier to full', 
+                        value: '`/hp <amount|full|zero>` - Update HP\n`/mp`, `/ip`, `/armor`, `/barrier` - Same for other resources\n`/rest` - Restore HP/MP to full\n`/defend` - Add max Armor & Barrier to current\n`/turn [@player]` - Clear Armor & Barrier to 0', 
                         inline: false 
                     },
                     { 
                         name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/round` - New round! Refills Armor/Barrier, resets penalties (GM only)', 
+                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/gmattack <d1> <d2> <mod> @targets` - GM attack with DEFEND buttons\n`/round` - New round (resets penalties & turn tracker only)', 
                         inline: false 
                     },
                     { 
@@ -2412,7 +2416,7 @@ client.on('interactionCreate', async interaction => {
                         inline: false 
                     }
                 )
-                .setFooter({ text: 'Penalties stack! Gate +1 twice = Gate ≤3 | Two -50% = No modifier' })
+                .setFooter({ text: '💥 = Armor | 🛡️ = Barrier | Penalties stack!' })
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
