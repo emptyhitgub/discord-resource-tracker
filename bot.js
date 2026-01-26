@@ -1545,16 +1545,13 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'round') {
-            // Defer reply immediately to prevent timeout
-            await interaction.deferReply();
-
             if (!activeEncounter.active) {
-                await interaction.editReply({ content: 'No active clash. Use `/clash start` first.' });
+                await interaction.reply({ content: 'No active clash. Use `/clash start` first.', ephemeral: true });
                 return;
             }
 
             if (activeEncounter.combatants.length === 0) {
-                await interaction.editReply({ content: 'No combatants in the clash.' });
+                await interaction.reply({ content: 'No combatants in the clash.', ephemeral: true });
                 return;
             }
 
@@ -1579,7 +1576,7 @@ client.on('interactionCreate', async interaction => {
                 .setFooter({ text: 'Good luck in the new round!' })
                 .setTimestamp();
 
-            await interaction.editReply({ 
+            await interaction.reply({ 
                 content: mentions.join(' '),
                 embeds: [embed] 
             });
@@ -1607,8 +1604,6 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'defend') {
-            await interaction.deferReply();
-            
             const player = interaction.user;
             const playerMember = interaction.member;
 
@@ -1629,7 +1624,7 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(`**${data.characterName}** raised their guard!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}`)
                 .setTimestamp();
 
-            await interaction.editReply({ embeds: [embed] });
+            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'resetpenalty') {
             const type = interaction.options.getString('type') || 'both'; // Default to both
