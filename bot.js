@@ -254,6 +254,52 @@ async function saveData() {
     }
 }
 
+// NEW: Only save character sheet (MAX values) to database - much faster!
+async function saveCharacterSheet(userId) {
+    if (!useDatabase) return; // Skip if not using database
+    
+    const data = playerData.get(userId);
+    if (!data) return;
+
+    try {
+        await pool.query(`
+            INSERT INTO players (
+                user_id, username, character_name,
+                hp, mp, ip, armor, barrier,
+                max_hp, max_mp, max_ip, max_armor, max_barrier,
+                status_effects, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET
+                username = $2,
+                character_name = $3,
+                max_hp = $9,
+                max_mp = $10,
+                max_ip = $11,
+                max_armor = $12,
+                max_barrier = $13,
+                updated_at = CURRENT_TIMESTAMP
+        `, [
+            userId,
+            data.username,
+            data.characterName,
+            data.HP,
+            data.MP,
+            data.IP,
+            data.Armor,
+            data.Barrier,
+            data.maxHP,
+            data.maxMP,
+            data.maxIP,
+            data.maxArmor,
+            data.maxBarrier,
+            JSON.stringify(data.statusEffects || [])
+        ]);
+    } catch (error) {
+        console.error('❌ Error saving character sheet:', error);
+    }
+}
+
 // Delete player from database
 async function deletePlayer(userId) {
     if (useDatabase) {
@@ -819,7 +865,7 @@ client.on('interactionCreate', async interaction => {
             data.username = playerMember.displayName;
             data.characterName = characterName;
 
-            saveData(); // Save after modification
+            await saveCharacterSheet(player.id); // Only save MAX values to database
 
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
@@ -1599,8 +1645,6 @@ client.on('interactionCreate', async interaction => {
             data.Armor = 0;
             data.Barrier = 0;
 
-            await saveData();
-
             const embed = new EmbedBuilder()
                 .setColor(0xFF6B6B)
                 .setTitle('💨 Turn Reset')
@@ -1610,8 +1654,6 @@ client.on('interactionCreate', async interaction => {
             await interaction.editReply({ embeds: [embed] });
 
         } else if (commandName === 'defend') {
-            await interaction.deferReply();
-
             const player = interaction.user;
             const playerMember = interaction.member;
 
@@ -1624,15 +1666,13 @@ client.on('interactionCreate', async interaction => {
             data.Armor += data.maxArmor;
             data.Barrier += data.maxBarrier;
 
-            await saveData();
-
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle('🛡️ Defended!')
                 .setDescription(`**${data.characterName}** raised their guard!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}`)
                 .setTimestamp();
 
-            await interaction.editReply({ embeds: [embed] });
+            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'resetpenalty') {
             const type = interaction.options.getString('type') || 'both'; // Default to both
@@ -2520,7 +2560,6 @@ client.on('interactionCreate', async interaction => {
                 }
             }
 
-            await saveData();
             await interaction.editReply({ content: resultText });
             return;
 
