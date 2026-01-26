@@ -1581,6 +1581,8 @@ client.on('interactionCreate', async interaction => {
             });
 
         } else if (commandName === 'ac') {
+            await interaction.deferReply();
+            
             const player = interaction.user;
             const playerMember = interaction.member;
 
@@ -1598,9 +1600,11 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(`**${data.characterName}**'s protections cleared!\n\n💥 Armor: 0\n🛡️ Barrier: 0`)
                 .setTimestamp();
 
-            await interaction.reply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed] });
 
         } else if (commandName === 'defend') {
+            await interaction.deferReply();
+            
             const player = interaction.user;
             const playerMember = interaction.member;
 
@@ -1621,7 +1625,7 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(`**${data.characterName}** raised their guard!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}`)
                 .setTimestamp();
 
-            await interaction.reply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed] });
 
         } else if (commandName === 'resetpenalty') {
             const type = interaction.options.getString('type') || 'both'; // Default to both
