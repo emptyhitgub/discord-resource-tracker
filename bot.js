@@ -674,8 +674,12 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('round')
-        .setDescription('Start new round - refills Armor/Barrier for all combatants in clash (GM only)')
+        .setDescription('Start new round - resets penalties and turn tracker (GM only)')
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+
+    new SlashCommandBuilder()
+        .setName('ac')
+        .setDescription('Clear your Armor and Barrier to 0'),
 
     new SlashCommandBuilder()
         .setName('resetpenalty')
@@ -1537,26 +1541,15 @@ client.on('interactionCreate', async interaction => {
             // Reset turn tracking
             activeEncounter.turnsTaken.clear();
 
-            // Refill Armor and Barrier for all combatants
             const mentions = [];
-            let refilledCount = 0;
-
             for (const userId of activeEncounter.combatants) {
-                const data = playerData.get(userId);
-                if (!data) continue;
-
-                data.Armor = data.maxArmor;
-                data.Barrier = data.maxBarrier;
                 mentions.push(`<@${userId}>`);
-                refilledCount++;
             }
-
-            await saveData();
 
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle('🔄 New Round Started!')
-                .setDescription(`✅ Armor & Barrier refilled for ${refilledCount} combatant(s)\n✅ Attack & Cast penalties reset\n✅ Turn tracker reset\n\nUse \`/clash list\` to see updated stats`)
+                .setDescription(`✅ Attack & Cast penalties reset\n✅ Turn tracker reset\n\nUse \`/clash list\` to see current stats`)
                 .setFooter({ text: 'Good luck in the new round!' })
                 .setTimestamp();
 
@@ -1564,6 +1557,26 @@ client.on('interactionCreate', async interaction => {
                 content: mentions.join(' '),
                 embeds: [embed] 
             });
+
+        } else if (commandName === 'ac') {
+            const player = interaction.user;
+            const playerMember = interaction.member;
+
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+
+            data.Armor = 0;
+            data.Barrier = 0;
+
+            await saveData();
+
+            const embed = new EmbedBuilder()
+                .setColor(0xFF6B6B)
+                .setTitle('💨 Armor & Barrier Cleared')
+                .setDescription(`**${data.characterName}**'s protections cleared!\n\n🛡️ Armor: 0\n💎 Barrier: 0`)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'resetpenalty') {
             const type = interaction.options.getString('type') || 'both'; // Default to both
@@ -2228,7 +2241,7 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            // Attack hit - offer defend option to each target
+            // Attack hit - create simple react buttons
             const embed = new EmbedBuilder()
                 .setColor(isCrit ? 0xFFD700 : 0x00FF00)
                 .setTitle('🎲 GM Attack - HIT!')
@@ -2238,54 +2251,48 @@ client.on('interactionCreate', async interaction => {
                     value: targetMatches.join(' '),
                     inline: false
                 })
-                .setFooter({ text: `${damage} ${damageType} damage incoming!` })
+                .setFooter({ text: `${damage} ${damageType} damage incoming! React to defend.` })
                 .setTimestamp();
 
-            // Batch fetch all members at once (prevents rate limiting)
-            const memberPromises = targetIds.map(id => 
-                interaction.guild.members.fetch(id).catch(err => {
-                    console.error(`Failed to fetch member ${id}:`, err);
-                    return null;
-                })
-            );
-            const members = await Promise.all(memberPromises);
-
-            // Create defend buttons for each target
-            const rows = [];
-            const targetPings = []; // For pinging
+            // Create reaction buttons based on damage type
+            const row = new ActionRowBuilder();
             
-            for (let i = 0; i < targetIds.length; i += 5) { // Max 5 buttons per row
-                const row = new ActionRowBuilder();
-                const chunk = targetIds.slice(i, i + 5);
-                
-                for (let j = 0; j < chunk.length; j++) {
-                    const targetId = chunk[j];
-                    const targetMember = members[i + j];
-                    
-                    if (!targetMember) continue; // Skip if member not found
-                    
-                    initPlayer(targetId, targetMember.displayName);
-                    const targetData = playerData.get(targetId);
-                    
-                    row.addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(`defend_${targetId}_${damage}_${damageType}`)
-                            .setLabel(`${targetData.characterName}: DEFEND?`)
-                            .setStyle(ButtonStyle.Primary)
-                            .setEmoji('🛡️')
-                    );
-                    
-                    targetPings.push(`<@${targetId}>`); // Add ping
-                }
-                if (row.components.length > 0) {
-                    rows.push(row);
-                }
+            if (damageType === 'armor') {
+                row.addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`react_armor_${damage}_${interaction.id}`)
+                        .setLabel('🛡️ React with Armor')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(`react_take_${damage}_armor_${interaction.id}`)
+                        .setLabel('💔 Take Damage')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+            } else if (damageType === 'barrier') {
+                row.addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`react_barrier_${damage}_${interaction.id}`)
+                        .setLabel('💎 React with Barrier')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(`react_take_${damage}_barrier_${interaction.id}`)
+                        .setLabel('💔 Take Damage')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+            } else if (damageType === 'true') {
+                // True damage - only take damage button
+                row.addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`react_take_${damage}_true_${interaction.id}`)
+                        .setLabel('💔 Take True Damage')
+                        .setStyle(ButtonStyle.Danger)
+                );
             }
 
             await interaction.editReply({
-                content: `${targetPings.join(' ')} ⚔️ **INCOMING ATTACK!**`, // Ping all targets
+                content: `${targetMatches.join(' ')} ⚔️ **INCOMING ATTACK!**`,
                 embeds: [embed],
-                components: rows
+                components: [row]
             });
 
         } else if (commandName === 'eot') {
@@ -2397,66 +2404,90 @@ client.on('interactionCreate', async interaction => {
     const action = parts[0];
     
     // Handle defend buttons
-    if (action === 'defend') {
-        const [, targetId, damageStr, damageType] = parts;
+    // Handle react buttons (armor/barrier/take damage)
+    if (action === 'react') {
+        const [, reactionType, damageStr, ...rest] = parts;
         const damage = parseInt(damageStr);
         
-        // Only the target can click their defend button
-        if (interaction.user.id !== targetId) {
-            await interaction.reply({ content: 'This is not your defend button!', ephemeral: true });
-            return;
-        }
+        const userId = interaction.user.id;
+        const playerMember = interaction.member;
+        
+        initPlayer(userId, playerMember.displayName);
+        const data = playerData.get(userId);
 
-        initPlayer(targetId, interaction.member.displayName);
-        const data = playerData.get(targetId);
+        let resultText = '';
+        const oldArmor = data.Armor;
+        const oldBarrier = data.Barrier;
+        const oldHP = data.HP;
 
-        // Apply defend: restore armor and barrier to max
-        data.Armor = data.maxArmor;
-        data.Barrier = data.maxBarrier;
-
-        // Now apply damage
-        let damageResult = '';
-        if (damageType === 'true') {
-            // True damage - direct to HP
-            data.HP = Math.max(0, data.HP - damage);
-            damageResult = `💔 ${damage} true damage → HP: ${data.HP}/${data.maxHP}`;
-        } else if (damageType === 'armor') {
-            // Armor damage
+        if (reactionType === 'armor') {
+            // React with armor: Add MAX armor first, then take damage
+            data.Armor += data.maxArmor;
+            
             const armorDamage = Math.min(damage, data.Armor);
             const overflowDamage = Math.max(0, damage - data.Armor);
             data.Armor = Math.max(0, data.Armor - damage);
             
             if (overflowDamage > 0) {
                 data.HP = Math.max(0, data.HP - overflowDamage);
-                damageResult = `🛡️ Armor: ${data.maxArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${data.HP}/${data.maxHP}`;
+                resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
             } else {
-                damageResult = `🛡️ Armor: ${data.maxArmor} → ${data.Armor} (-${armorDamage})`;
+                resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})`;
             }
-        } else if (damageType === 'barrier') {
-            // Barrier damage
+        } else if (reactionType === 'barrier') {
+            // React with barrier: Add MAX barrier first, then take damage
+            data.Barrier += data.maxBarrier;
+            
             const barrierDamage = Math.min(damage, data.Barrier);
             const overflowDamage = Math.max(0, damage - data.Barrier);
             data.Barrier = Math.max(0, data.Barrier - damage);
             
             if (overflowDamage > 0) {
                 data.HP = Math.max(0, data.HP - overflowDamage);
-                damageResult = `💎 Barrier: ${data.maxBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${data.HP}/${data.maxHP}`;
+                resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
             } else {
-                damageResult = `💎 Barrier: ${data.maxBarrier} → ${data.Barrier} (-${barrierDamage})`;
+                resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})`;
+            }
+        } else if (reactionType === 'take') {
+            // Take damage - no reaction
+            const damageType2 = rest[0]; // armor, barrier, or true
+            
+            if (damageType2 === 'true') {
+                // True damage - direct to HP
+                data.HP = Math.max(0, data.HP - damage);
+                resultText = `**${data.characterName}** took the hit!\n\n💔 ${damage} true damage → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+            } else if (damageType2 === 'armor') {
+                // Armor damage
+                const armorDamage = Math.min(damage, data.Armor);
+                const overflowDamage = Math.max(0, damage - data.Armor);
+                data.Armor = Math.max(0, data.Armor - damage);
+                
+                if (overflowDamage > 0) {
+                    data.HP = Math.max(0, data.HP - overflowDamage);
+                    resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                } else {
+                    resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})`;
+                }
+            } else if (damageType2 === 'barrier') {
+                // Barrier damage
+                const barrierDamage = Math.min(damage, data.Barrier);
+                const overflowDamage = Math.max(0, damage - data.Barrier);
+                data.Barrier = Math.max(0, data.Barrier - damage);
+                
+                if (overflowDamage > 0) {
+                    data.HP = Math.max(0, data.HP - overflowDamage);
+                    resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                } else {
+                    resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})`;
+                }
             }
         }
 
         await saveData();
 
-        const embed = new EmbedBuilder()
-            .setColor(0x0099FF)
-            .setTitle('🛡️ DEFENDED!')
-            .setDescription(`**${data.characterName}** raised their guard!\n\n🛡️ Armor restored: ${data.maxArmor}\n💎 Barrier restored: ${data.maxBarrier}\n\n${damageResult}`)
-            .setTimestamp();
-
-        await interaction.update({ 
-            embeds: [embed],
-            components: [] // Remove buttons
+        await interaction.reply({
+            content: resultText,
+            ephemeral: false // Public so everyone can see who reacted
         });
 
         return;
