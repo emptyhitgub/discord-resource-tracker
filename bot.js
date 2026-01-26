@@ -488,7 +488,8 @@ const commands = [
                 .setRequired(true)
                 .addChoices(
                     { name: 'armor', value: 'armor' },
-                    { name: 'barrier', value: 'barrier' }
+                    { name: 'barrier', value: 'barrier' },
+                    { name: 'true damage (direct HP)', value: 'true' }
                 ))
         .addStringOption(option =>
             option.setName('players')
@@ -680,6 +681,10 @@ const commands = [
     new SlashCommandBuilder()
         .setName('ac')
         .setDescription('Clear your Armor and Barrier to 0'),
+
+    new SlashCommandBuilder()
+        .setName('defend')
+        .setDescription('Add your max Armor and Barrier to current values'),
 
     new SlashCommandBuilder()
         .setName('resetpenalty')
@@ -1169,7 +1174,8 @@ client.on('interactionCreate', async interaction => {
             }
 
             const results = [];
-            const protectionResource = damageType === 'armor' ? 'Armor' : 'Barrier';
+            const isTrueDamage = damageType === 'true';
+            const protectionResource = isTrueDamage ? null : (damageType === 'armor' ? 'Armor' : 'Barrier');
 
             for (const userId of targetPlayers) {
                 try {
@@ -1177,29 +1183,37 @@ client.on('interactionCreate', async interaction => {
                     initPlayer(userId, playerMember.displayName);
                     const data = playerData.get(userId);
 
-                    let remainingDamage = damageAmount;
                     let protectionUsed = 0;
                     let hpLost = 0;
                     
-                    // First, reduce protection (Armor or Barrier)
-                    if (data[protectionResource] > 0) {
-                        if (data[protectionResource] >= remainingDamage) {
-                            // Protection absorbs all damage
-                            protectionUsed = remainingDamage;
-                            data[protectionResource] -= remainingDamage;
-                            remainingDamage = 0;
-                        } else {
-                            // Protection absorbs some, rest goes to HP
-                            protectionUsed = data[protectionResource];
-                            remainingDamage -= data[protectionResource];
-                            data[protectionResource] = 0;
+                    if (isTrueDamage) {
+                        // True damage - direct to HP
+                        hpLost = damageAmount;
+                        data.HP -= damageAmount;
+                    } else {
+                        // Normal damage - protection first
+                        let remainingDamage = damageAmount;
+                        
+                        // First, reduce protection (Armor or Barrier)
+                        if (data[protectionResource] > 0) {
+                            if (data[protectionResource] >= remainingDamage) {
+                                // Protection absorbs all damage
+                                protectionUsed = remainingDamage;
+                                data[protectionResource] -= remainingDamage;
+                                remainingDamage = 0;
+                            } else {
+                                // Protection absorbs some, rest goes to HP
+                                protectionUsed = data[protectionResource];
+                                remainingDamage -= data[protectionResource];
+                                data[protectionResource] = 0;
+                            }
                         }
-                    }
 
-                    // Apply remaining damage to HP
-                    if (remainingDamage > 0) {
-                        hpLost = remainingDamage;
-                        data.HP -= remainingDamage;
+                        // Apply remaining damage to HP
+                        if (remainingDamage > 0) {
+                            hpLost = remainingDamage;
+                            data.HP -= remainingDamage;
+                        }
                     }
 
                     results.push({
@@ -1208,8 +1222,8 @@ client.on('interactionCreate', async interaction => {
                         hpLost,
                         currentHP: data.HP,
                         maxHP: data.maxHP,
-                        currentProtection: data[protectionResource],
-                        maxProtection: data[`max${protectionResource}`]
+                        currentProtection: isTrueDamage ? null : data[protectionResource],
+                        maxProtection: isTrueDamage ? null : data[`max${protectionResource}`]
                     });
                 } catch (error) {
                     console.error(`Error processing player ${userId}:`, error);
@@ -1221,15 +1235,23 @@ client.on('interactionCreate', async interaction => {
             const embed = new EmbedBuilder()
                 .setColor(0xFF0000)
                 .setTitle(`💥 ${damageAmount} Damage Applied!`)
-                .setDescription(`Type: ${protectionResource}`)
+                .setDescription(isTrueDamage ? 'Type: True Damage (direct HP)' : `Type: ${protectionResource}`)
                 .setTimestamp();
 
             for (const result of results) {
-                embed.addFields({
-                    name: `${result.name}`,
-                    value: `${RESOURCE_EMOJIS[protectionResource]} Absorbed: ${result.protectionUsed} | ${RESOURCE_EMOJIS.HP} Lost: ${result.hpLost}\n${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP} | ${RESOURCE_EMOJIS[protectionResource]} ${protectionResource}: ${result.currentProtection}/${result.maxProtection}`,
-                    inline: false
-                });
+                if (isTrueDamage) {
+                    embed.addFields({
+                        name: `${result.name}`,
+                        value: `${RESOURCE_EMOJIS.HP} HP Damage: ${result.hpLost}\n${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP}`,
+                        inline: false
+                    });
+                } else {
+                    embed.addFields({
+                        name: `${result.name}`,
+                        value: `${RESOURCE_EMOJIS[protectionResource]} Absorbed: ${result.protectionUsed} | ${RESOURCE_EMOJIS.HP} HP Damage: ${result.hpLost}\n${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP} | ${RESOURCE_EMOJIS[protectionResource]} ${protectionResource}: ${result.currentProtection}/${result.maxProtection}`,
+                        inline: false
+                    });
+                }
             }
 
             await interaction.reply({ embeds: [embed] });
@@ -1573,7 +1595,30 @@ client.on('interactionCreate', async interaction => {
             const embed = new EmbedBuilder()
                 .setColor(0xFF6B6B)
                 .setTitle('💨 Armor & Barrier Cleared')
-                .setDescription(`**${data.characterName}**'s protections cleared!\n\n🛡️ Armor: 0\n💎 Barrier: 0`)
+                .setDescription(`**${data.characterName}**'s protections cleared!\n\n💥 Armor: 0\n🛡️ Barrier: 0`)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+
+        } else if (commandName === 'defend') {
+            const player = interaction.user;
+            const playerMember = interaction.member;
+
+            initPlayer(player.id, playerMember.displayName);
+            const data = playerData.get(player.id);
+
+            const oldArmor = data.Armor;
+            const oldBarrier = data.Barrier;
+
+            data.Armor += data.maxArmor;
+            data.Barrier += data.maxBarrier;
+
+            await saveData();
+
+            const embed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('🛡️ Defended!')
+                .setDescription(`**${data.characterName}** raised their guard!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}`)
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
@@ -2241,7 +2286,7 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            // Attack hit - create simple react buttons
+            // Attack hit - simple defend or take damage
             const embed = new EmbedBuilder()
                 .setColor(isCrit ? 0xFFD700 : 0x00FF00)
                 .setTitle('🎲 GM Attack - HIT!')
@@ -2251,43 +2296,21 @@ client.on('interactionCreate', async interaction => {
                     value: targetMatches.join(' '),
                     inline: false
                 })
-                .setFooter({ text: `${damage} ${damageType} damage incoming! React to defend.` })
+                .setFooter({ text: `${damage} ${damageType} damage incoming!` })
                 .setTimestamp();
 
-            // Create reaction buttons based on damage type
-            const row = new ActionRowBuilder();
-            
-            if (damageType === 'armor') {
-                row.addComponents(
+            // Simple buttons: Defend or Take Damage
+            const row = new ActionRowBuilder()
+                .addComponents(
                     new ButtonBuilder()
-                        .setCustomId(`react_armor_${damage}_${interaction.id}`)
-                        .setLabel('🛡️ React with Armor')
-                        .setStyle(ButtonStyle.Primary),
+                        .setCustomId(`gmattack_defend_${damage}_${damageType}_${interaction.id}`)
+                        .setLabel('🛡️ Defend')
+                        .setStyle(ButtonStyle.Success),
                     new ButtonBuilder()
-                        .setCustomId(`react_take_${damage}_armor_${interaction.id}`)
+                        .setCustomId(`gmattack_take_${damage}_${damageType}_${interaction.id}`)
                         .setLabel('💔 Take Damage')
-                        .setStyle(ButtonStyle.Secondary)
-                );
-            } else if (damageType === 'barrier') {
-                row.addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`react_barrier_${damage}_${interaction.id}`)
-                        .setLabel('💎 React with Barrier')
-                        .setStyle(ButtonStyle.Primary),
-                    new ButtonBuilder()
-                        .setCustomId(`react_take_${damage}_barrier_${interaction.id}`)
-                        .setLabel('💔 Take Damage')
-                        .setStyle(ButtonStyle.Secondary)
-                );
-            } else if (damageType === 'true') {
-                // True damage - only take damage button
-                row.addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`react_take_${damage}_true_${interaction.id}`)
-                        .setLabel('💔 Take True Damage')
                         .setStyle(ButtonStyle.Danger)
                 );
-            }
 
             await interaction.editReply({
                 content: `${targetMatches.join(' ')} ⚔️ **INCOMING ATTACK!**`,
@@ -2404,13 +2427,12 @@ client.on('interactionCreate', async interaction => {
     const action = parts[0];
     
     // Handle defend buttons
-    // Handle react buttons (armor/barrier/take damage)
-    if (action === 'react') {
+    // Handle gmattack buttons (defend or take)
+    if (action === 'gmattack') {
         try {
-            // Defer immediately to prevent timeout
             await interaction.deferReply();
 
-            const [, reactionType, damageStr, ...rest] = parts;
+            const [, buttonType, damageStr, damageType] = parts;
             const damage = parseInt(damageStr);
             
             const userId = interaction.user.id;
@@ -2419,87 +2441,84 @@ client.on('interactionCreate', async interaction => {
             initPlayer(userId, playerMember.displayName);
             const data = playerData.get(userId);
 
-            let resultText = '';
             const oldArmor = data.Armor;
             const oldBarrier = data.Barrier;
             const oldHP = data.HP;
+            let resultText = '';
 
-            if (reactionType === 'armor') {
-                // React with armor: Add MAX armor first, then take damage
+            if (buttonType === 'defend') {
+                // DEFEND: Add BOTH max armor and barrier, then take damage
                 data.Armor += data.maxArmor;
-                
-                const armorDamage = Math.min(damage, data.Armor);
-                const overflowDamage = Math.max(0, damage - data.Armor);
-                data.Armor = Math.max(0, data.Armor - damage);
-                
-                if (overflowDamage > 0) {
-                    data.HP = Math.max(0, data.HP - overflowDamage);
-                    resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
-                } else {
-                    resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})`;
-                }
-            } else if (reactionType === 'barrier') {
-                // React with barrier: Add MAX barrier first, then take damage
                 data.Barrier += data.maxBarrier;
-                
-                const barrierDamage = Math.min(damage, data.Barrier);
-                const overflowDamage = Math.max(0, damage - data.Barrier);
-                data.Barrier = Math.max(0, data.Barrier - damage);
-                
-                if (overflowDamage > 0) {
-                    data.HP = Math.max(0, data.HP - overflowDamage);
-                    resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
-                } else {
-                    resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})`;
-                }
-            } else if (reactionType === 'take') {
-                // Take damage - no reaction
-                const damageType2 = rest[0]; // armor, barrier, or true
-                
-                if (damageType2 === 'true') {
-                    // True damage - direct to HP
-                    data.HP = Math.max(0, data.HP - damage);
-                    resultText = `**${data.characterName}** took the hit!\n\n💔 ${damage} true damage → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
-                } else if (damageType2 === 'armor') {
-                    // Armor damage
+
+                // Apply damage based on type
+                if (damageType === 'armor') {
                     const armorDamage = Math.min(damage, data.Armor);
                     const overflowDamage = Math.max(0, damage - data.Armor);
                     data.Armor = Math.max(0, data.Armor - damage);
                     
                     if (overflowDamage > 0) {
                         data.HP = Math.max(0, data.HP - overflowDamage);
-                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} (untouched)\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                     } else {
-                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})`;
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} (untouched)`;
                     }
-                } else if (damageType2 === 'barrier') {
-                    // Barrier damage
+                } else if (damageType === 'barrier') {
                     const barrierDamage = Math.min(damage, data.Barrier);
                     const overflowDamage = Math.max(0, damage - data.Barrier);
                     data.Barrier = Math.max(0, data.Barrier - damage);
                     
                     if (overflowDamage > 0) {
                         data.HP = Math.max(0, data.HP - overflowDamage);
-                        resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} (untouched)\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier}\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                     } else {
-                        resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})`;
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} (untouched)\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier}`;
                     }
+                } else if (damageType === 'true') {
+                    data.HP = Math.max(0, data.HP - damage);
+                    resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}\n💔 True Damage: ${damage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                }
+
+            } else if (buttonType === 'take') {
+                // TAKE DAMAGE: No defense
+                if (damageType === 'armor') {
+                    const armorDamage = Math.min(damage, data.Armor);
+                    const overflowDamage = Math.max(0, damage - data.Armor);
+                    data.Armor = Math.max(0, data.Armor - damage);
+                    
+                    if (overflowDamage > 0) {
+                        data.HP = Math.max(0, data.HP - overflowDamage);
+                        resultText = `**${data.characterName}** took the hit!\n\n💥 Armor: ${oldArmor} → ${data.Armor}\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    } else {
+                        resultText = `**${data.characterName}** took the hit!\n\n💥 Armor: ${oldArmor} → ${data.Armor}`;
+                    }
+                } else if (damageType === 'barrier') {
+                    const barrierDamage = Math.min(damage, data.Barrier);
+                    const overflowDamage = Math.max(0, damage - data.Barrier);
+                    data.Barrier = Math.max(0, data.Barrier - damage);
+                    
+                    if (overflowDamage > 0) {
+                        data.HP = Math.max(0, data.HP - overflowDamage);
+                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Barrier: ${oldBarrier} → ${data.Barrier}\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    } else {
+                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Barrier: ${oldBarrier} → ${data.Barrier}`;
+                    }
+                } else if (damageType === 'true') {
+                    data.HP = Math.max(0, data.HP - damage);
+                    resultText = `**${data.characterName}** took the hit!\n\n💔 True Damage: ${damage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                 }
             }
 
             await saveData();
-
-            await interaction.editReply({
-                content: resultText
-            });
-
+            await interaction.editReply({ content: resultText });
             return;
+
         } catch (error) {
-            console.error('Error handling react button:', error);
+            console.error('Error handling gmattack button:', error);
             try {
-                await interaction.editReply({ content: 'An error occurred processing your reaction.' });
+                await interaction.editReply({ content: 'An error occurred.' });
             } catch (e) {
-                console.error('Failed to send error message:', e);
+                console.error('Failed to send error:', e);
             }
             return;
         }
