@@ -1122,6 +1122,8 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'reset') {
+            await interaction.deferReply();
+
             playerData.clear();
             
             // Clear database if using PostgreSQL
@@ -1142,7 +1144,7 @@ client.on('interactionCreate', async interaction => {
                 .setDescription('All player resources have been cleared.')
                 .setTimestamp();
 
-            await interaction.reply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed] });
 
         } else if (commandName === 'delete') {
             const player = interaction.options.getUser('player');
@@ -1545,13 +1547,15 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed] });
 
         } else if (commandName === 'round') {
+            await interaction.deferReply();
+
             if (!activeEncounter.active) {
-                await interaction.reply({ content: 'No active clash. Use `/clash start` first.', ephemeral: true });
+                await interaction.editReply({ content: 'No active clash. Use `/clash start` first.' });
                 return;
             }
 
             if (activeEncounter.combatants.length === 0) {
-                await interaction.reply({ content: 'No combatants in the clash.', ephemeral: true });
+                await interaction.editReply({ content: 'No combatants in the clash.' });
                 return;
             }
 
@@ -1576,12 +1580,14 @@ client.on('interactionCreate', async interaction => {
                 .setFooter({ text: 'Good luck in the new round!' })
                 .setTimestamp();
 
-            await interaction.reply({ 
+            await interaction.editReply({ 
                 content: mentions.join(' '),
                 embeds: [embed] 
             });
 
         } else if (commandName === 'turn') {
+            await interaction.deferReply();
+
             const targetUser = interaction.options.getUser('player') || interaction.user;
             const targetMember = targetUser.id === interaction.user.id 
                 ? interaction.member 
@@ -1601,9 +1607,11 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(`**${data.characterName}**'s protections cleared!\n\n💥 Armor: 0\n🛡️ Barrier: 0`)
                 .setTimestamp();
 
-            await interaction.reply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed] });
 
         } else if (commandName === 'defend') {
+            await interaction.deferReply();
+
             const player = interaction.user;
             const playerMember = interaction.member;
 
@@ -1624,7 +1632,7 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(`**${data.characterName}** raised their guard!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}`)
                 .setTimestamp();
 
-            await interaction.reply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed] });
 
         } else if (commandName === 'resetpenalty') {
             const type = interaction.options.getString('type') || 'both'; // Default to both
@@ -2307,7 +2315,7 @@ client.on('interactionCreate', async interaction => {
                 .addComponents(
                     new ButtonBuilder()
                         .setCustomId(`gmattack_defend_${damage}_${damageType}_${interaction.id}`)
-                        .setLabel('🛡️ Defend')
+                        .setLabel('🛡️ React with Defend')
                         .setStyle(ButtonStyle.Success),
                     new ButtonBuilder()
                         .setCustomId(`gmattack_take_${damage}_${damageType}_${interaction.id}`)
