@@ -2406,91 +2406,103 @@ client.on('interactionCreate', async interaction => {
     // Handle defend buttons
     // Handle react buttons (armor/barrier/take damage)
     if (action === 'react') {
-        const [, reactionType, damageStr, ...rest] = parts;
-        const damage = parseInt(damageStr);
-        
-        const userId = interaction.user.id;
-        const playerMember = interaction.member;
-        
-        initPlayer(userId, playerMember.displayName);
-        const data = playerData.get(userId);
+        try {
+            // Defer immediately to prevent timeout
+            await interaction.deferReply();
 
-        let resultText = '';
-        const oldArmor = data.Armor;
-        const oldBarrier = data.Barrier;
-        const oldHP = data.HP;
+            const [, reactionType, damageStr, ...rest] = parts;
+            const damage = parseInt(damageStr);
+            
+            const userId = interaction.user.id;
+            const playerMember = interaction.member;
+            
+            initPlayer(userId, playerMember.displayName);
+            const data = playerData.get(userId);
 
-        if (reactionType === 'armor') {
-            // React with armor: Add MAX armor first, then take damage
-            data.Armor += data.maxArmor;
-            
-            const armorDamage = Math.min(damage, data.Armor);
-            const overflowDamage = Math.max(0, damage - data.Armor);
-            data.Armor = Math.max(0, data.Armor - damage);
-            
-            if (overflowDamage > 0) {
-                data.HP = Math.max(0, data.HP - overflowDamage);
-                resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
-            } else {
-                resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})`;
-            }
-        } else if (reactionType === 'barrier') {
-            // React with barrier: Add MAX barrier first, then take damage
-            data.Barrier += data.maxBarrier;
-            
-            const barrierDamage = Math.min(damage, data.Barrier);
-            const overflowDamage = Math.max(0, damage - data.Barrier);
-            data.Barrier = Math.max(0, data.Barrier - damage);
-            
-            if (overflowDamage > 0) {
-                data.HP = Math.max(0, data.HP - overflowDamage);
-                resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
-            } else {
-                resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})`;
-            }
-        } else if (reactionType === 'take') {
-            // Take damage - no reaction
-            const damageType2 = rest[0]; // armor, barrier, or true
-            
-            if (damageType2 === 'true') {
-                // True damage - direct to HP
-                data.HP = Math.max(0, data.HP - damage);
-                resultText = `**${data.characterName}** took the hit!\n\n💔 ${damage} true damage → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
-            } else if (damageType2 === 'armor') {
-                // Armor damage
+            let resultText = '';
+            const oldArmor = data.Armor;
+            const oldBarrier = data.Barrier;
+            const oldHP = data.HP;
+
+            if (reactionType === 'armor') {
+                // React with armor: Add MAX armor first, then take damage
+                data.Armor += data.maxArmor;
+                
                 const armorDamage = Math.min(damage, data.Armor);
                 const overflowDamage = Math.max(0, damage - data.Armor);
                 data.Armor = Math.max(0, data.Armor - damage);
                 
                 if (overflowDamage > 0) {
                     data.HP = Math.max(0, data.HP - overflowDamage);
-                    resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                 } else {
-                    resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})`;
+                    resultText = `**${data.characterName}** reacted with Armor!\n\n🛡️ Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor} (-${armorDamage})`;
                 }
-            } else if (damageType2 === 'barrier') {
-                // Barrier damage
+            } else if (reactionType === 'barrier') {
+                // React with barrier: Add MAX barrier first, then take damage
+                data.Barrier += data.maxBarrier;
+                
                 const barrierDamage = Math.min(damage, data.Barrier);
                 const overflowDamage = Math.max(0, damage - data.Barrier);
                 data.Barrier = Math.max(0, data.Barrier - damage);
                 
                 if (overflowDamage > 0) {
                     data.HP = Math.max(0, data.HP - overflowDamage);
-                    resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                 } else {
-                    resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})`;
+                    resultText = `**${data.characterName}** reacted with Barrier!\n\n💎 Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier} (-${barrierDamage})`;
+                }
+            } else if (reactionType === 'take') {
+                // Take damage - no reaction
+                const damageType2 = rest[0]; // armor, barrier, or true
+                
+                if (damageType2 === 'true') {
+                    // True damage - direct to HP
+                    data.HP = Math.max(0, data.HP - damage);
+                    resultText = `**${data.characterName}** took the hit!\n\n💔 ${damage} true damage → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                } else if (damageType2 === 'armor') {
+                    // Armor damage
+                    const armorDamage = Math.min(damage, data.Armor);
+                    const overflowDamage = Math.max(0, damage - data.Armor);
+                    data.Armor = Math.max(0, data.Armor - damage);
+                    
+                    if (overflowDamage > 0) {
+                        data.HP = Math.max(0, data.HP - overflowDamage);
+                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    } else {
+                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Armor: ${oldArmor} → ${data.Armor} (-${armorDamage})`;
+                    }
+                } else if (damageType2 === 'barrier') {
+                    // Barrier damage
+                    const barrierDamage = Math.min(damage, data.Barrier);
+                    const overflowDamage = Math.max(0, damage - data.Barrier);
+                    data.Barrier = Math.max(0, data.Barrier - damage);
+                    
+                    if (overflowDamage > 0) {
+                        data.HP = Math.max(0, data.HP - overflowDamage);
+                        resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})\n💔 Overflow: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    } else {
+                        resultText = `**${data.characterName}** took the hit!\n\n💎 Barrier: ${oldBarrier} → ${data.Barrier} (-${barrierDamage})`;
+                    }
                 }
             }
+
+            await saveData();
+
+            await interaction.editReply({
+                content: resultText
+            });
+
+            return;
+        } catch (error) {
+            console.error('Error handling react button:', error);
+            try {
+                await interaction.editReply({ content: 'An error occurred processing your reaction.' });
+            } catch (e) {
+                console.error('Failed to send error message:', e);
+            }
+            return;
         }
-
-        await saveData();
-
-        await interaction.reply({
-            content: resultText,
-            ephemeral: false // Public so everyone can see who reacted
-        });
-
-        return;
     }
     
     const type = parts[1];
