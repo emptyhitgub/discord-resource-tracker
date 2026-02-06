@@ -1,56 +1,36 @@
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits } = require('discord.js');
+const { Pool } = require('pg');
+const fs = require('fs');
 require('dotenv').config();
 
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
-const { Pool } = require('pg');
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
+});
 
-// Bot configuration
-const TOKEN = process.env.DISCORD_BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID || '927071447300571137';
-const DATABASE_URL = process.env.DATABASE_URL;
+const PREFIX = '$';
 
-// PostgreSQL connection pool (only if DATABASE_URL exists)
-let pool = null;
-let useDatabase = false;
+// Database setup
+const useDatabase = process.env.DATABASE_URL ? true : false;
+let pool;
 
-if (DATABASE_URL) {
+if (useDatabase) {
     pool = new Pool({
-        connectionString: DATABASE_URL,
-        ssl: {
-            rejectUnauthorized: false
-        }
+        connectionString: process.env.DATABASE_URL,
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
     });
-    useDatabase = true;
-    console.log('✅ Using PostgreSQL database for storage');
+    console.log('✅ Using PostgreSQL database');
 } else {
-    console.log('⚠️ No DATABASE_URL found, using JSON file storage');
+    console.log('⚠️ No DATABASE_URL found, using in-memory storage');
 }
 
-// File path for persistent storage (fallback)
-const DATA_FILE = path.join(__dirname, 'playerData.json');
-
-// In-memory storage for player resources
-let playerData = new Map();
-
-// Active encounter data
-let activeEncounter = {
-    active: false,
-    combatants: [], // Array of userIds
-    turnsTaken: new Set() // Track who has taken their turn this round
-};
-
-// Attack and Cast counters (resets on /round)
-let attackCounters = new Map(); // userId -> count
-let castCounters = new Map(); // userId -> count
-
-// Cumulative penalty tracking
-let attackPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0, blind: false }
-let castPenalties = new Map(); // userId -> { gate: 0, damageReduction: 0, blind: false }
-
-// Resource types
-const RESOURCES = ['HP', 'MP', 'IP', 'Armor', 'Barrier'];
+// In-memory data (session data - never saved to DB)
+const playerData = new Map();
+const activeEncounter = { active: false, combatants: [], turnsTaken: new Set() };
+const savedActions = new Map();
 
 // Resource emojis
 const RESOURCE_EMOJIS = {
@@ -61,784 +41,311 @@ const RESOURCE_EMOJIS = {
     Barrier: '🛡️'
 };
 
-// Initialize database tables
-async function initDatabase() {
-    if (!useDatabase) return;
-
-    try {
-        // Create players table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS players (
-                user_id TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
-                character_name TEXT NOT NULL,
-                hp INTEGER DEFAULT 0,
-                mp INTEGER DEFAULT 0,
-                ip INTEGER DEFAULT 0,
-                armor INTEGER DEFAULT 0,
-                barrier INTEGER DEFAULT 0,
-                max_hp INTEGER DEFAULT 0,
-                max_mp INTEGER DEFAULT 0,
-                max_ip INTEGER DEFAULT 0,
-                max_armor INTEGER DEFAULT 0,
-                max_barrier INTEGER DEFAULT 0,
-                status_effects JSONB DEFAULT '[]'::jsonb,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Create encounters table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS encounters (
-                id SERIAL PRIMARY KEY,
-                active BOOLEAN DEFAULT false,
-                combatants JSONB DEFAULT '[]'::jsonb,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Ensure there's at least one encounter row
-        await pool.query(`
-            INSERT INTO encounters (id, active, combatants)
-            VALUES (1, false, '[]'::jsonb)
-            ON CONFLICT DO NOTHING
-        `);
-
-        console.log('✅ Database tables initialized');
-    } catch (error) {
-        console.error('❌ Error initializing database:', error);
-    }
-}
-
-// Load data from database or file
-async function loadData() {
-    if (useDatabase) {
-        try {
-            // Load players
-            const playersResult = await pool.query('SELECT * FROM players');
-            playerData.clear();
-            
-            for (const row of playersResult.rows) {
-                playerData.set(row.user_id, {
-                    username: row.username,
-                    characterName: row.character_name,
-                    HP: row.hp,
-                    MP: row.mp,
-                    IP: row.ip,
-                    Armor: row.armor,
-                    Barrier: row.barrier,
-                    maxHP: row.max_hp,
-                    maxMP: row.max_mp,
-                    maxIP: row.max_ip,
-                    maxArmor: row.max_armor,
-                    maxBarrier: row.max_barrier,
-                    statusEffects: row.status_effects || []
-                });
-            }
-
-            // Load encounter
-            const encounterResult = await pool.query('SELECT * FROM encounters WHERE id = 1');
-            if (encounterResult.rows.length > 0) {
-                activeEncounter = {
-                    active: encounterResult.rows[0].active,
-                    combatants: encounterResult.rows[0].combatants || [],
-                    turnsTaken: new Set() // Always initialize as Set
-                };
-            } else {
-                activeEncounter = {
-                    active: false,
-                    combatants: [],
-                    turnsTaken: new Set()
-                };
-            }
-
-            console.log(`✅ Loaded ${playerData.size} players from database`);
-        } catch (error) {
-            console.error('❌ Error loading from database:', error);
-        }
-    } else {
-        // Fallback to JSON file
-        try {
-            if (fs.existsSync(DATA_FILE)) {
-                const rawData = fs.readFileSync(DATA_FILE, 'utf8');
-                const parsed = JSON.parse(rawData);
-                playerData = new Map(Object.entries(parsed.players || parsed));
-                activeEncounter = parsed.encounter || { active: false, combatants: [], turnsTaken: new Set() };
-                // Ensure turnsTaken is a Set (in case loaded from JSON as array)
-                if (activeEncounter.turnsTaken && !activeEncounter.turnsTaken.has) {
-                    activeEncounter.turnsTaken = new Set(activeEncounter.turnsTaken);
-                } else if (!activeEncounter.turnsTaken) {
-                    activeEncounter.turnsTaken = new Set();
-                }
-                console.log(`Loaded data for ${playerData.size} players from ${DATA_FILE}`);
-            } else {
-                console.log('No existing data file found. Starting fresh.');
-            }
-        } catch (error) {
-            console.error('Error loading data:', error);
-            console.log('Starting with empty data.');
-        }
-    }
-}
-
-// Save data to database or file
-async function saveData() {
-    if (useDatabase) {
-        try {
-            // Save all players
-            for (const [userId, data] of playerData) {
-                await pool.query(`
-                    INSERT INTO players (
-                        user_id, username, character_name,
-                        hp, mp, ip, armor, barrier,
-                        max_hp, max_mp, max_ip, max_armor, max_barrier,
-                        status_effects, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP)
-                    ON CONFLICT (user_id) 
-                    DO UPDATE SET
-                        username = $2,
-                        character_name = $3,
-                        hp = $4,
-                        mp = $5,
-                        ip = $6,
-                        armor = $7,
-                        barrier = $8,
-                        max_hp = $9,
-                        max_mp = $10,
-                        max_ip = $11,
-                        max_armor = $12,
-                        max_barrier = $13,
-                        status_effects = $14,
-                        updated_at = CURRENT_TIMESTAMP
-                `, [
-                    userId,
-                    data.username,
-                    data.characterName,
-                    data.HP,
-                    data.MP,
-                    data.IP,
-                    data.Armor,
-                    data.Barrier,
-                    data.maxHP,
-                    data.maxMP,
-                    data.maxIP,
-                    data.maxArmor,
-                    data.maxBarrier,
-                    JSON.stringify(data.statusEffects || [])
-                ]);
-            }
-
-            // Save encounter
-            await pool.query(`
-                UPDATE encounters 
-                SET active = $1, combatants = $2, updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
-            `, [activeEncounter.active, JSON.stringify(activeEncounter.combatants)]);
-
-            console.log(`✅ Saved ${playerData.size} players to database`);
-        } catch (error) {
-            console.error('❌ Error saving to database:', error);
-        }
-    } else {
-        // Fallback to JSON file
-        try {
-            const dataObject = {
-                players: Object.fromEntries(playerData),
-                encounter: activeEncounter
-            };
-            fs.writeFileSync(DATA_FILE, JSON.stringify(dataObject, null, 2), 'utf8');
-            console.log(`Data saved for ${playerData.size} players`);
-        } catch (error) {
-            console.error('Error saving data:', error);
-        }
-    }
-}
-
-// Delete player from database
-async function deletePlayer(userId) {
-    if (useDatabase) {
-        try {
-            await pool.query('DELETE FROM players WHERE user_id = $1', [userId]);
-            console.log(`✅ Deleted player ${userId} from database`);
-        } catch (error) {
-            console.error('❌ Error deleting player from database:', error);
-        }
-    }
-    // Also delete from memory
-    playerData.delete(userId);
-}
-
 // Initialize player data
-function initPlayer(userId, displayName, characterName = null) {
+function initPlayer(userId, username, characterName = null) {
     if (!playerData.has(userId)) {
         playerData.set(userId, {
-            username: displayName,
-            characterName: characterName || displayName,
-            HP: 0,
-            MP: 0,
+            username: username,
+            characterName: characterName || username,
+            HP: 100,
+            MP: 50,
             IP: 0,
-            Armor: 0,
-            Barrier: 0,
-            maxHP: 0,
-            maxMP: 0,
-            maxIP: 0,
-            maxArmor: 0,
-            maxBarrier: 0,
-            statusEffects: [],  // Array of {name: string, duration: number}
-            savedActions: {}    // Object of {actionName: {type, dice1, dice2, modifier, mpCost}}
+            Armor: 20,
+            Barrier: 15,
+            maxHP: 100,
+            maxMP: 50,
+            maxIP: 100,
+            maxArmor: 20,
+            maxBarrier: 15,
+            statusEffects: []
         });
-    } else {
-        // Update display name in case it changed
-        playerData.get(userId).username = displayName;
-        // Update character name if provided
-        if (characterName) {
-            playerData.get(userId).characterName = characterName;
-        }
-        // Initialize savedActions if it doesn't exist (for existing players)
-        if (!playerData.get(userId).savedActions) {
-            playerData.get(userId).savedActions = {};
-        }
     }
 }
 
-// Create the bot client
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-    ]
-});
-
-// Define slash commands
-const commands = [
-    new SlashCommandBuilder()
-        .setName('set')
-        .setDescription('Set a player\'s MAX resource values')
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('The player to set resources for')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('name')
-                .setDescription('Character name (for display)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('hp')
-                .setDescription('Max HP value')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('mp')
-                .setDescription('Max MP value')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('ip')
-                .setDescription('Max IP value')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('armor')
-                .setDescription('Max Armor value')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('barrier')
-                .setDescription('Max Barrier value')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('view')
-        .setDescription('View a player\'s current resources')
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('The player to view (leave empty for yourself)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('update')
-        .setDescription('Add or subtract from a resource')
-        .addStringOption(option =>
-            option.setName('resource')
-                .setDescription('The resource to update')
-                .setRequired(true)
-                .addChoices(
-                    { name: 'HP', value: 'HP' },
-                    { name: 'MP', value: 'MP' },
-                    { name: 'IP', value: 'IP' },
-                    { name: 'Armor', value: 'Armor' },
-                    { name: 'Barrier', value: 'Barrier' }
-                ))
-        .addIntegerOption(option =>
-            option.setName('amount')
-                .setDescription('Amount to add (positive) or subtract (negative)')
-                .setRequired(true))
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('The player to update (leave empty for yourself)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('status')
-        .setDescription('Manage status effects (buffs/debuffs)')
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('add')
-                .setDescription('Add a status effect')
-                .addStringOption(option =>
-                    option.setName('name')
-                        .setDescription('Name of the status effect (e.g., Bleed, Haste)')
-                        .setRequired(true))
-                .addIntegerOption(option =>
-                    option.setName('duration')
-                        .setDescription('Duration in turns')
-                        .setRequired(true))
-                .addUserOption(option =>
-                    option.setName('player')
-                        .setDescription('Player to apply status to (leave empty for yourself)')
-                        .setRequired(false)))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('clear')
-                .setDescription('Remove a status effect')
-                .addStringOption(option =>
-                    option.setName('name')
-                        .setDescription('Name of the status effect to remove')
-                        .setRequired(true))
-                .addUserOption(option =>
-                    option.setName('player')
-                        .setDescription('Player to remove status from (leave empty for yourself)')
-                        .setRequired(false))),
-
-    new SlashCommandBuilder()
-        .setName('tick')
-        .setDescription('Advance turn by 1 (reduces status durations by 1)')
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('Player to advance turn for (leave empty for yourself)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('hp')
-        .setDescription('Update your HP quickly')
-        .addStringOption(option =>
-            option.setName('amount')
-                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('mp')
-        .setDescription('Update your MP quickly')
-        .addStringOption(option =>
-            option.setName('amount')
-                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('ip')
-        .setDescription('Update your IP quickly')
-        .addStringOption(option =>
-            option.setName('amount')
-                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('armor')
-        .setDescription('Update your Armor quickly')
-        .addStringOption(option =>
-            option.setName('amount')
-                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('barrier')
-        .setDescription('Update your Barrier quickly')
-        .addStringOption(option =>
-            option.setName('amount')
-                .setDescription('Amount to change (use "full" to max, "zero" to set 0)')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('rest')
-        .setDescription('Restore all your resources to maximum'),
-
-    new SlashCommandBuilder()
-        .setName('reset')
-        .setDescription('Reset all player data (GM only)')
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-    new SlashCommandBuilder()
-        .setName('viewall')
-        .setDescription('View all players and their resources in detail'),
-
-    new SlashCommandBuilder()
-        .setName('delete')
-        .setDescription('Delete a player\'s data')
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('The player whose data to delete')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('damage')
-        .setDescription('Apply damage (reduces Armor/Barrier first, then HP)')
-        .addIntegerOption(option =>
-            option.setName('amount')
-                .setDescription('Amount of damage')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('type')
-                .setDescription('Type of protection to use first')
-                .setRequired(true)
-                .addChoices(
-                    { name: 'armor', value: 'armor' },
-                    { name: 'barrier', value: 'barrier' },
-                    { name: 'true damage (direct HP)', value: 'true' }
-                ))
-        .addStringOption(option =>
-            option.setName('players')
-                .setDescription('Players to damage (mention multiple: @player1 @player2, or leave empty for self)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('attack')
-        .setDescription('Roll attack dice with damage calculation')
-        .addIntegerOption(option =>
-            option.setName('dice1')
-                .setDescription('First dice size (e.g., 10 for d10)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('dice2')
-                .setDescription('Second dice size (e.g., 8 for d8)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('modifier')
-                .setDescription('Damage modifier (added to HighRoll)')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('penalties')
-                .setDescription('Optional: Apply penalties manually (e.g., "gate" or "damage")')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'Gate +1', value: 'gate' },
-                    { name: '-50% Modifier', value: 'damage50' },
-                    { name: 'No Modifier', value: 'damage100' },
-                    { name: 'Blind (Gate 3)', value: 'blind' }
-                )),
-
-    new SlashCommandBuilder()
-        .setName('cast')
-        .setDescription('Roll cast dice with damage calculation (MP penalty on 2nd+ cast)')
-        .addIntegerOption(option =>
-            option.setName('dice1')
-                .setDescription('First dice size (e.g., 10 for d10)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('dice2')
-                .setDescription('Second dice size (e.g., 8 for d8)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('modifier')
-                .setDescription('Damage modifier (added to HighRoll)')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('penalties')
-                .setDescription('Optional: Apply penalties manually')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'Gate +1', value: 'gate' },
-                    { name: '-50% Modifier', value: 'damage50' },
-                    { name: 'No Modifier', value: 'damage100' },
-                    { name: 'Blind (Gate 3)', value: 'blind' }
-                )),
-
-    new SlashCommandBuilder()
-        .setName('check')
-        .setDescription('Roll a skill check (fails if ANY dice ≤ gate)')
-        .addIntegerOption(option =>
-            option.setName('dice1')
-                .setDescription('First dice size (e.g., 10 for d10)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('dice2')
-                .setDescription('Second dice size (e.g., 8 for d8)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('gate')
-                .setDescription('Gate threshold (fail if ANY dice ≤ gate)')
-                .setRequired(true))
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('Who is making this check? (leave empty for yourself)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('actionsave')
-        .setDescription('Save, list, or delete custom attack/cast actions')
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('add')
-                .setDescription('Save a new action')
-                .addStringOption(option =>
-                    option.setName('name')
-                        .setDescription('Action name (e.g., "fireball", "sword_slash")')
-                        .setRequired(true))
-                .addStringOption(option =>
-                    option.setName('type')
-                        .setDescription('Action type')
-                        .setRequired(true)
-                        .addChoices(
-                            { name: 'Attack (uses weapon modifier)', value: 'attack' },
-                            { name: 'Cast (uses MP cost)', value: 'cast' }
-                        ))
-                .addIntegerOption(option =>
-                    option.setName('dice1')
-                        .setDescription('First dice size (e.g., 10 for d10)')
-                        .setRequired(true))
-                .addIntegerOption(option =>
-                    option.setName('dice2')
-                        .setDescription('Second dice size (e.g., 8 for d8)')
-                        .setRequired(true))
-                .addIntegerOption(option =>
-                    option.setName('modifier')
-                        .setDescription('For Attack: weapon modifier | For Cast: spell damage bonus')
-                        .setRequired(true))
-                .addIntegerOption(option =>
-                    option.setName('mpcost')
-                        .setDescription('For Cast only: base MP cost (multicast adds +10/+20)')
-                        .setRequired(false)))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('list')
-                .setDescription('List all your saved actions'))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('delete')
-                .setDescription('Delete a saved action')
-                .addStringOption(option =>
-                    option.setName('name')
-                        .setDescription('Action name to delete')
-                        .setRequired(true))),
-
-    new SlashCommandBuilder()
-        .setName('use')
-        .setDescription('Use a saved action')
-        .addStringOption(option =>
-            option.setName('action')
-                .setDescription('Name of the saved action to use')
-                .setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('gmattack')
-        .setDescription('GM attack with instant damage application (GM only)')
-        .addIntegerOption(option =>
-            option.setName('dice1')
-                .setDescription('First dice size (e.g., 10 for d10)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('dice2')
-                .setDescription('Second dice size (e.g., 8 for d8)')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('modifier')
-                .setDescription('Damage modifier')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('targets')
-                .setDescription('Target players (mention: @player1 @player2)')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('penalty')
-                .setDescription('Optional penalty (no stacking)')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'Gate 1', value: 'gate1' },
-                    { name: 'Gate 2', value: 'gate2' },
-                    { name: 'Gate 3', value: 'gate3' },
-                    { name: '-50% Modifier', value: 'mod50' },
-                    { name: 'No Modifier', value: 'mod100' }
-                ))
-        .addStringOption(option =>
-            option.setName('damage_type')
-                .setDescription('Damage type (default: armor)')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'Armor', value: 'armor' },
-                    { name: 'Barrier', value: 'barrier' },
-                    { name: 'True Damage (HP)', value: 'true' }
-                ))
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-    new SlashCommandBuilder()
-        .setName('eot')
-        .setDescription('Mark turn as complete (End of Turn)')
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('Player who finished their turn (GM can specify, defaults to self)')
-                .setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('round')
-        .setDescription('Start new round - resets penalties and turn tracker (GM only)')
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-    new SlashCommandBuilder()
-        .setName('ac')
-        .setDescription('Clear your Armor and Barrier to 0'),
-
-    new SlashCommandBuilder()
-        .setName('defend')
-        .setDescription('Add your max Armor and Barrier to current values'),
-
-    new SlashCommandBuilder()
-        .setName('resetpenalty')
-        .setDescription('Reset penalties (defaults to both attack & cast for yourself)')
-        .addStringOption(option =>
-            option.setName('type')
-                .setDescription('Which penalty to reset (default: both)')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'Attack', value: 'attack' },
-                    { name: 'Cast', value: 'cast' },
-                    { name: 'Both', value: 'both' }
-                ))
-        .addUserOption(option =>
-            option.setName('player')
-                .setDescription('Player to reset (default: yourself)')
-                .setRequired(false))
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-    new SlashCommandBuilder()
-        .setName('clash')
-        .setDescription('Manage combat encounters')
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('start')
-                .setDescription('Start a new encounter (GM only)'))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('end')
-                .setDescription('End the current encounter (GM only)'))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('add')
-                .setDescription('Add players to the encounter')
-                .addStringOption(option =>
-                    option.setName('players')
-                        .setDescription('Players to add (mention: @player1 @player2, or leave empty for yourself)')
-                        .setRequired(false)))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('remove')
-                .setDescription('Remove players from the encounter')
-                .addStringOption(option =>
-                    option.setName('players')
-                        .setDescription('Players to remove (mention: @player1 @player2)')
-                        .setRequired(false)))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('list')
-                .setDescription('List all combatants in the active encounter'))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('init')
-                .setDescription('Show initiative tracker (who has taken their turn)')),
-
-    new SlashCommandBuilder()
-        .setName('guide')
-        .setDescription('Show all available bot commands and how to use them')
-].map(command => command.toJSON());
-
-// Register commands
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-(async () => {
+// Load player from database (only when needed)
+async function loadPlayerFromDB(userId) {
+    if (!useDatabase) return null;
+    
     try {
-        console.log('Started refreshing application (/) commands.');
-        await rest.put(
-            Routes.applicationCommands(CLIENT_ID),
-            { body: commands },
-        );
-        console.log('Successfully reloaded application (/) commands.');
+        const result = await pool.query('SELECT * FROM players WHERE user_id = $1', [userId]);
+        if (result.rows.length > 0) {
+            const row = result.rows[0];
+            return {
+                username: row.username,
+                characterName: row.character_name,
+                HP: row.max_hp, // Start at max
+                MP: row.max_mp,
+                IP: 0,
+                Armor: row.max_armor,
+                Barrier: row.max_barrier,
+                maxHP: row.max_hp,
+                maxMP: row.max_mp,
+                maxIP: row.max_ip,
+                maxArmor: row.max_armor,
+                maxBarrier: row.max_barrier,
+                statusEffects: []
+            };
+        }
     } catch (error) {
-        console.error(error);
+        console.error('Error loading player:', error);
     }
-})();
+    return null;
+}
 
-// Bot ready event
-client.once('ready', async () => {
-    console.log(`Logged in as ${client.user.tag}!`);
-    console.log('Resource Tracker Bot is online!');
+// Save character sheet to database (ONLY on /set)
+async function saveCharacterSheet(userId, data) {
+    if (!useDatabase) return;
     
-    // Initialize database if using PostgreSQL
-    if (useDatabase) {
-        await initDatabase();
+    try {
+        await pool.query(`
+            INSERT INTO players (
+                user_id, username, character_name,
+                hp, mp, ip, armor, barrier,
+                max_hp, max_mp, max_ip, max_armor, max_barrier,
+                status_effects, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET
+                username = $2,
+                character_name = $3,
+                max_hp = $9,
+                max_mp = $10,
+                max_ip = $11,
+                max_armor = $12,
+                max_barrier = $13,
+                updated_at = CURRENT_TIMESTAMP
+        `, [
+            userId,
+            data.username,
+            data.characterName,
+            data.maxHP, // Initial values = max
+            data.maxMP,
+            data.maxIP,
+            data.maxArmor,
+            data.maxBarrier,
+            data.maxHP,
+            data.maxMP,
+            data.maxIP,
+            data.maxArmor,
+            data.maxBarrier,
+            JSON.stringify([])
+        ]);
+        console.log(`✅ Saved character sheet for ${data.characterName}`);
+    } catch (error) {
+        console.error('❌ Error saving character sheet:', error);
+    }
+}
+
+// Command help data
+const COMMANDS = {
+    // Setup
+    'view': {
+        description: 'View your or another player\'s resources',
+        usage: '$view [@player]',
+        examples: ['$view', '$view @Gandalf']
+    },
+    
+    // Combat - Fast
+    'a': {
+        description: 'Attack roll (alias: attack)',
+        usage: '$a <d1> <d2> <mod> <gate>',
+        examples: ['$a 10 8 5 1', '$a 12 6 10 2'],
+        notes: 'Fumble (1,1) = Auto-Fail | Crit (same die ≥6) = Auto-Success'
+    },
+    'attack': {
+        description: 'Attack roll (same as $a)',
+        usage: '$attack <d1> <d2> <mod> <gate>',
+        examples: ['$attack 10 8 5 1']
+    },
+    'c': {
+        description: 'Cast spell (alias: cast)',
+        usage: '$c <d1> <d2> <mod> <gate> [mp_cost]',
+        examples: ['$c 10 8 15 1', '$c 10 8 15 1 20'],
+        notes: 'Default MP cost: 10'
+    },
+    'cast': {
+        description: 'Cast spell (same as $c)',
+        usage: '$cast <d1> <d2> <mod> <gate> [mp_cost]',
+        examples: ['$cast 10 8 15 1 20']
+    },
+    'hp': {
+        description: 'Update HP',
+        usage: '$hp <amount|full|zero>',
+        examples: ['$hp -20', '$hp +15', '$hp full', '$hp zero']
+    },
+    'mp': {
+        description: 'Update MP',
+        usage: '$mp <amount|full|zero>',
+        examples: ['$mp -10', '$mp full']
+    },
+    'armor': {
+        description: 'Update Armor',
+        usage: '$armor <amount|full|zero>',
+        examples: ['$armor -15', '$armor full']
+    },
+    'barrier': {
+        description: 'Update Barrier',
+        usage: '$barrier <amount|full|zero>',
+        examples: ['$barrier -10', '$barrier full']
+    },
+    'defend': {
+        description: 'Add max Armor & Barrier to current values',
+        usage: '$defend',
+        examples: ['$defend']
+    },
+    'turn': {
+        description: 'Clear Armor & Barrier to 0',
+        usage: '$turn [@player]',
+        examples: ['$turn', '$turn @Tank']
+    },
+    'rest': {
+        description: 'Restore HP & MP to full',
+        usage: '$rest',
+        examples: ['$rest']
+    },
+    
+    // GM Tools
+    'gmattack': {
+        description: 'GM attack with defend buttons',
+        usage: '$gmattack <d1> <d2> <mod> <gate> <@targets> [armor|barrier|true]',
+        examples: [
+            '$gmattack 10 8 15 1 @Tank @DPS',
+            '$gmattack 12 6 20 2 @Wizard barrier',
+            '$gmattack 10 10 30 1 @All true'
+        ],
+        notes: 'Default damage type: armor. Players click buttons to defend or take damage.'
+    },
+    'damage': {
+        description: 'Apply damage to players',
+        usage: '$damage <amount> <armor|barrier> [@players]',
+        examples: ['$damage 20 armor @Tank', '$damage 15 barrier @All']
+    },
+    
+    // Clash Management
+    'clash': {
+        description: 'Manage combat encounters',
+        usage: '$clash <start|end|add|remove|list>',
+        examples: [
+            '$clash start',
+            '$clash add @Gandalf @Aragorn',
+            '$clash remove @Orc',
+            '$clash list',
+            '$clash end'
+        ]
+    },
+    'eot': {
+        description: 'Mark end of turn',
+        usage: '$eot [@player]',
+        examples: ['$eot', '$eot @Gandalf']
+    },
+    'round': {
+        description: 'Start new round (GM only)',
+        usage: '$round',
+        examples: ['$round'],
+        notes: 'Resets turn tracker only. Does NOT refill armor/barrier.'
+    },
+    
+    // Guide
+    'guide': {
+        description: 'Show command help',
+        usage: '$guide [command]',
+        examples: ['$guide', '$guide gmattack', '$guide attack']
+    }
+};
+
+// Send guide
+function sendGuide(message, commandName = null) {
+    if (commandName) {
+        // Specific command help
+        const cmd = COMMANDS[commandName.toLowerCase()];
+        if (!cmd) {
+            message.reply(`Command \`${commandName}\` not found. Use \`$guide\` to see all commands.`);
+            return;
+        }
+        
+        const embed = new EmbedBuilder()
+            .setColor(0x00BFFF)
+            .setTitle(`📖 ${commandName}`)
+            .setDescription(cmd.description)
+            .addFields({ name: 'Usage', value: `\`${cmd.usage}\``, inline: false });
+        
+        if (cmd.examples) {
+            embed.addFields({ 
+                name: 'Examples', 
+                value: cmd.examples.map(ex => `\`${ex}\``).join('\n'), 
+                inline: false 
+            });
+        }
+        
+        if (cmd.notes) {
+            embed.addFields({ name: 'Notes', value: cmd.notes, inline: false });
+        }
+        
+        message.reply({ embeds: [embed] });
+        return;
     }
     
-    // Load existing data
-    await loadData();
+    // Full guide - list all commands
+    const embed = new EmbedBuilder()
+        .setColor(0x00BFFF)
+        .setTitle('📖 Command Guide')
+        .setDescription('Use `$guide <command>` for detailed help on a specific command.\n\n**Quick Commands:**')
+        .addFields(
+            {
+                name: '⚔️ Combat (Fast)',
+                value: '`$a` `$attack` `$c` `$cast` - Roll attacks/spells\n`$hp` `$mp` `$armor` `$barrier` - Update resources\n`$defend` `$turn` `$rest` - Quick actions',
+                inline: false
+            },
+            {
+                name: '🎲 GM Tools',
+                value: '`$gmattack` `$damage` - GM attacks & damage\n`$round` - New round (GM only)',
+                inline: false
+            },
+            {
+                name: '⚔️ Clash',
+                value: '`$clash` - Manage encounters\n`$eot` - End of turn',
+                inline: false
+            },
+            {
+                name: '📊 Info',
+                value: '`$view` - View resources\n`$guide <cmd>` - Command help',
+                inline: false
+            }
+        )
+        .setFooter({ text: 'Example: $guide gmattack for detailed help' });
+    
+    message.reply({ embeds: [embed] });
+}
+
+client.on('ready', () => {
+    console.log(`✅ Logged in as ${client.user.tag}`);
+    console.log(`✅ Prefix: ${PREFIX}`);
+    console.log(`✅ Fast prefix commands enabled!`);
 });
 
-// Handle slash commands
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const { commandName } = interaction;
-
+client.on('messageCreate', async message => {
+    // Ignore bots and non-prefix messages
+    if (message.author.bot) return;
+    if (!message.content.startsWith(PREFIX)) return;
+    
+    const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+    const command = args.shift().toLowerCase();
+    
     try {
-        if (commandName === 'set') {
-            const player = interaction.options.getUser('player');
-            const playerMember = await interaction.guild.members.fetch(player.id);
-            const characterName = interaction.options.getString('name');
-            const newMaxHP = interaction.options.getInteger('hp');
-            const newMaxMP = interaction.options.getInteger('mp');
-            const newMaxIP = interaction.options.getInteger('ip');
-            const newMaxArmor = interaction.options.getInteger('armor');
-            const newMaxBarrier = interaction.options.getInteger('barrier');
-
-            initPlayer(player.id, playerMember.displayName, characterName);
-            const data = playerData.get(player.id);
+        // Guide
+        if (command === 'guide') {
+            sendGuide(message, args[0]);
+            return;
+        }
+        
+        // View
+        if (command === 'view') {
+            const targetUser = message.mentions.users.first() || message.author;
+            const targetMember = await message.guild.members.fetch(targetUser.id);
             
-            // Get current IP to preserve it
-            const currentIP = data.IP || 0;
-
-            // Update max values
-            data.maxHP = newMaxHP;
-            data.maxMP = newMaxMP;
-            data.maxIP = newMaxIP;
-            data.maxArmor = newMaxArmor;
-            data.maxBarrier = newMaxBarrier;
-
-            // Set HP, MP, Armor, and Barrier to new max, keep IP
-            data.HP = newMaxHP;
-            data.MP = newMaxMP;
-            data.IP = currentIP; // Preserve current IP
-            data.Armor = newMaxArmor; // Set to full
-            data.Barrier = newMaxBarrier; // Set to full
-
-            data.username = playerMember.displayName;
-            data.characterName = characterName;
-
-            saveData(); // Save after modification
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle(`✨ Max Resources Set for ${characterName}`)
-                .setDescription('HP, MP, Armor, and Barrier restored to max. IP preserved.')
-                .addFields(
-                    { name: `${RESOURCE_EMOJIS.HP} HP`, value: `${data.HP}/${data.maxHP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.MP} MP`, value: `${data.MP}/${data.maxMP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.IP} IP`, value: `${data.IP}/${data.maxIP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.Armor} Armor`, value: `${data.Armor}/${data.maxArmor}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.Barrier} Barrier`, value: `${data.Barrier}/${data.maxBarrier}`, inline: true }
-                )
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'view') {
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = await interaction.guild.members.fetch(player.id);
+            initPlayer(targetUser.id, targetMember.displayName);
+            const data = playerData.get(targetUser.id);
             
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
             const embed = new EmbedBuilder()
                 .setColor(0x0099FF)
                 .setTitle(`${data.characterName}'s Resources`)
@@ -850,1443 +357,357 @@ client.on('interactionCreate', async interaction => {
                     { name: `${RESOURCE_EMOJIS.Barrier} Barrier`, value: `${data.Barrier}/${data.maxBarrier}`, inline: true }
                 )
                 .setTimestamp();
-
-            // Add status effects if any
-            if (data.statusEffects && data.statusEffects.length > 0) {
-                const statusText = data.statusEffects
-                    .map(s => `**${s.name}** (${s.duration} turns)`)
-                    .join('\n');
-                embed.addFields({ name: '🔮 Status Effects', value: statusText, inline: false });
-            }
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'update') {
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = await interaction.guild.members.fetch(player.id);
-            const resource = interaction.options.getString('resource');
-            const amount = interaction.options.getInteger('amount');
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
             
-            const oldValue = data[resource];
-            const maxValue = data[`max${resource}`];
-            data[resource] += amount;
-            const newValue = data[resource];
-
-            saveData(); // Save after modification
-
-            const embed = new EmbedBuilder()
-                .setColor(amount > 0 ? 0x00FF00 : 0xFF0000)
-                .setTitle(`${data.characterName}'s ${RESOURCE_EMOJIS[resource]} ${resource} Updated`)
-                .setDescription(`${oldValue} ${amount > 0 ? '+' : ''}${amount} = **${newValue}/${maxValue}**`)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (['hp', 'mp', 'ip', 'armor', 'barrier'].includes(commandName)) {
-            const player = interaction.user;
-            const playerMember = interaction.member;
-            const resourceLower = commandName;
-            // Map command names to proper resource names in data
-            const resourceMap = {
-                'hp': 'HP',
-                'mp': 'MP',
-                'ip': 'IP',
-                'armor': 'Armor',
-                'barrier': 'Barrier'
-            };
-            const resource = resourceMap[resourceLower];
-            const amountStr = interaction.options.getString('amount');
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            // Handle "full" command
-            if (amountStr.toLowerCase() === 'full') {
-                const oldValue = data[resource];
-                const maxValue = data[`max${resource}`];
-                data[resource] = maxValue;
-
-                saveData(); // Save after modification
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x00FF00)
-                    .setTitle(`${data.characterName}'s ${RESOURCE_EMOJIS[resource]} ${resource} Restored!`)
-                    .setDescription(`${oldValue}/${maxValue} → **${maxValue}/${maxValue}**`)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
+            message.reply({ embeds: [embed] });
+            return;
+        }
+        
+        // Attack (fast!)
+        if (command === 'a' || command === 'attack') {
+            if (args.length < 4) {
+                message.reply('Usage: `$a <d1> <d2> <mod> <gate>`\nExample: `$a 10 8 5 1`');
                 return;
             }
-
-            // Handle "zero" command
-            if (amountStr.toLowerCase() === 'zero') {
-                const oldValue = data[resource];
-                const maxValue = data[`max${resource}`];
-                data[resource] = 0;
-
-                saveData(); // Save after modification
-
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF0000)
-                    .setTitle(`${data.characterName}'s ${RESOURCE_EMOJIS[resource]} ${resource} Set to Zero`)
-                    .setDescription(`${oldValue}/${maxValue} → **0/${maxValue}**`)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-                return;
-            }
-
-            // Parse amount
-            const amount = parseInt(amountStr);
-            if (isNaN(amount)) {
-                await interaction.reply({ content: 'Please enter a valid number, "full", or "zero"', ephemeral: true });
-                return;
-            }
-
-            const oldValue = data[resource];
-            const maxValue = data[`max${resource}`];
-            data[resource] += amount;
-            const newValue = data[resource];
-
-            saveData(); // Save after modification
-
-            const embed = new EmbedBuilder()
-                .setColor(amount > 0 ? 0x00FF00 : 0xFF0000)
-                .setTitle(`${data.characterName}'s ${RESOURCE_EMOJIS[resource]} ${resource} Updated`)
-                .setDescription(`${oldValue} ${amount > 0 ? '+' : ''}${amount} = **${newValue}/${maxValue}**`)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'rest') {
-            const player = interaction.user;
-            const playerMember = interaction.member;
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            data.HP = data.maxHP;
-            data.MP = data.maxMP;
-            // IP stays as is
-            data.Armor = data.maxArmor; // Set to full
-            data.Barrier = data.maxBarrier; // Set to full
-
-            saveData(); // Save after modification
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle(`✨ ${data.characterName} Rested!`)
-                .setDescription('HP, MP, Armor, and Barrier fully restored. IP stays.')
-                .addFields(
-                    { name: `${RESOURCE_EMOJIS.HP} HP`, value: `${data.HP}/${data.maxHP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.MP} MP`, value: `${data.MP}/${data.maxMP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.IP} IP`, value: `${data.IP}/${data.maxIP}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.Armor} Armor`, value: `${data.Armor}/${data.maxArmor}`, inline: true },
-                    { name: `${RESOURCE_EMOJIS.Barrier} Barrier`, value: `${data.Barrier}/${data.maxBarrier}`, inline: true }
-                )
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'status') {
-            const subcommand = interaction.options.getSubcommand();
             
-            if (subcommand === 'add') {
-                const player = interaction.options.getUser('player') || interaction.user;
-                const playerMember = player.id === interaction.user.id 
-                    ? interaction.member 
-                    : await interaction.guild.members.fetch(player.id);
-                const statusName = interaction.options.getString('name');
-                const duration = interaction.options.getInteger('duration');
-
-                initPlayer(player.id, playerMember.displayName);
-                const data = playerData.get(player.id);
-
-                // Check if status already exists
-                const existingIndex = data.statusEffects.findIndex(s => s.name.toLowerCase() === statusName.toLowerCase());
-                
-                if (existingIndex !== -1) {
-                    // Update existing status duration
-                    data.statusEffects[existingIndex].duration = duration;
-                    
-                    saveData();
-
-                    const embed = new EmbedBuilder()
-                        .setColor(0xFFAA00)
-                        .setTitle(`🔄 Status Updated`)
-                        .setDescription(`**${statusName}** on ${data.characterName} updated to ${duration} turns`)
-                        .setTimestamp();
-
-                    await interaction.reply({ embeds: [embed] });
-                } else {
-                    // Add new status
-                    data.statusEffects.push({ name: statusName, duration: duration });
-
-                    saveData();
-
-                    const embed = new EmbedBuilder()
-                        .setColor(0xFF6B6B)
-                        .setTitle(`✨ Status Applied`)
-                        .setDescription(`**${statusName}** applied to ${data.characterName} for ${duration} turns`)
-                        .setTimestamp();
-
-                    await interaction.reply({ embeds: [embed] });
-                }
-            } else if (subcommand === 'clear') {
-                const player = interaction.options.getUser('player') || interaction.user;
-                const playerMember = player.id === interaction.user.id 
-                    ? interaction.member 
-                    : await interaction.guild.members.fetch(player.id);
-                const statusName = interaction.options.getString('name');
-
-                initPlayer(player.id, playerMember.displayName);
-                const data = playerData.get(player.id);
-
-                const index = data.statusEffects.findIndex(s => s.name.toLowerCase() === statusName.toLowerCase());
-
-                if (index === -1) {
-                    await interaction.reply({ content: `${data.characterName} doesn't have the status **${statusName}**`, ephemeral: true });
-                    return;
-                }
-
-                data.statusEffects.splice(index, 1);
-
-                saveData();
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x00FF00)
-                    .setTitle(`🗑️ Status Removed`)
-                    .setDescription(`**${statusName}** removed from ${data.characterName}`)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-            }
-
-        } else if (commandName === 'tick') {
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = player.id === interaction.user.id 
-                ? interaction.member 
-                : await interaction.guild.members.fetch(player.id);
+            const dice1 = parseInt(args[0]);
+            const dice2 = parseInt(args[1]);
+            const modifier = parseInt(args[2]);
+            const gate = parseInt(args[3]);
             
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            if (!data.statusEffects || data.statusEffects.length === 0) {
-                await interaction.reply({ content: `${data.characterName} has no status effects to tick.`, ephemeral: true });
-                return;
-            }
-
-            const beforeCount = data.statusEffects.length;
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
             
-            // Reduce all durations by 1
-            data.statusEffects.forEach(status => {
-                status.duration -= 1;
-            });
-
-            // Track expired statuses
-            const expired = data.statusEffects.filter(s => s.duration <= 0);
-
-            // Remove statuses with duration <= 0
-            data.statusEffects = data.statusEffects.filter(s => s.duration > 0);
-            
-            const totalExpired = beforeCount - data.statusEffects.length;
-
-            saveData(); // Save after modification
-
-            const embed = new EmbedBuilder()
-                .setColor(0x9B59B6)
-                .setTitle(`⏰ ${data.characterName}'s Turn Advanced`)
-                .setDescription(`All your status effect durations reduced by 1`)
-                .setTimestamp();
-
-            if (expired.length > 0) {
-                const expiredText = expired.map(s => s.name).join(', ');
-                embed.addFields({ name: '💨 Expired Status Effects', value: expiredText, inline: false });
-            }
-
-            if (data.statusEffects.length > 0) {
-                const remainingText = data.statusEffects
-                    .map(s => `**${s.name}** (${s.duration} turns)`)
-                    .join('\n');
-                embed.addFields({ name: '🔮 Remaining Status Effects', value: remainingText, inline: false });
-            }
-
-            embed.setFooter({ text: `${totalExpired} status effect(s) expired` });
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'reset') {
-            playerData.clear();
-            
-            // Clear database if using PostgreSQL
-            if (useDatabase) {
-                try {
-                    await pool.query('DELETE FROM players');
-                    console.log('✅ Cleared all players from database');
-                } catch (error) {
-                    console.error('❌ Error clearing database:', error);
-                }
-            }
-            
-            await saveData();
-            
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000)
-                .setTitle('⚠️ All Player Data Reset')
-                .setDescription('All player resources have been cleared.')
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'delete') {
-            const player = interaction.options.getUser('player');
-            
-            if (!playerData.has(player.id)) {
-                await interaction.reply({ content: `No data found for ${player.username}`, ephemeral: true });
-                return;
-            }
-
-            const characterName = playerData.get(player.id).characterName;
-            await deletePlayer(player.id);
-
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000)
-                .setTitle('🗑️ Player Data Deleted')
-                .setDescription(`All data for ${characterName} has been removed.`)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'damage') {
-            const damageAmount = interaction.options.getInteger('amount');
-            const damageType = interaction.options.getString('type');
-            const playersInput = interaction.options.getString('players');
-
-            // Parse players from mentions or default to self
-            let targetPlayers = [];
-            if (playersInput) {
-                const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
-                targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
-            } else {
-                targetPlayers = [interaction.user.id];
-            }
-
-            const results = [];
-            const isTrueDamage = damageType === 'true';
-            const protectionResource = isTrueDamage ? null : (damageType === 'armor' ? 'Armor' : 'Barrier');
-
-            for (const userId of targetPlayers) {
-                try {
-                    const playerMember = await interaction.guild.members.fetch(userId);
-                    initPlayer(userId, playerMember.displayName);
-                    const data = playerData.get(userId);
-
-                    let protectionUsed = 0;
-                    let hpLost = 0;
-                    
-                    if (isTrueDamage) {
-                        // True damage - direct to HP
-                        hpLost = damageAmount;
-                        data.HP -= damageAmount;
-                    } else {
-                        // Normal damage - protection first
-                        let remainingDamage = damageAmount;
-                        
-                        // First, reduce protection (Armor or Barrier)
-                        if (data[protectionResource] > 0) {
-                            if (data[protectionResource] >= remainingDamage) {
-                                // Protection absorbs all damage
-                                protectionUsed = remainingDamage;
-                                data[protectionResource] -= remainingDamage;
-                                remainingDamage = 0;
-                            } else {
-                                // Protection absorbs some, rest goes to HP
-                                protectionUsed = data[protectionResource];
-                                remainingDamage -= data[protectionResource];
-                                data[protectionResource] = 0;
-                            }
-                        }
-
-                        // Apply remaining damage to HP
-                        if (remainingDamage > 0) {
-                            hpLost = remainingDamage;
-                            data.HP -= remainingDamage;
-                        }
-                    }
-
-                    results.push({
-                        name: data.characterName,
-                        protectionUsed,
-                        hpLost,
-                        currentHP: data.HP,
-                        maxHP: data.maxHP,
-                        currentProtection: isTrueDamage ? null : data[protectionResource],
-                        maxProtection: isTrueDamage ? null : data[`max${protectionResource}`]
-                    });
-                } catch (error) {
-                    console.error(`Error processing player ${userId}:`, error);
-                }
-            }
-
-            saveData();
-
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000)
-                .setTitle(`💥 ${damageAmount} Damage Applied!`)
-                .setDescription(isTrueDamage ? 'Type: True Damage (direct HP)' : `Type: ${protectionResource}`)
-                .setTimestamp();
-
-            for (const result of results) {
-                if (isTrueDamage) {
-                    embed.addFields({
-                        name: `${result.name}`,
-                        value: `${RESOURCE_EMOJIS.HP} HP Damage: ${result.hpLost}\n${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP}`,
-                        inline: false
-                    });
-                } else {
-                    embed.addFields({
-                        name: `${result.name}`,
-                        value: `${RESOURCE_EMOJIS[protectionResource]} Absorbed: ${result.protectionUsed} | ${RESOURCE_EMOJIS.HP} HP Damage: ${result.hpLost}\n${RESOURCE_EMOJIS.HP} HP: ${result.currentHP}/${result.maxHP} | ${RESOURCE_EMOJIS[protectionResource]} ${protectionResource}: ${result.currentProtection}/${result.maxProtection}`,
-                        inline: false
-                    });
-                }
-            }
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'attack') {
-            const dice1 = interaction.options.getInteger('dice1');
-            const dice2 = interaction.options.getInteger('dice2');
-            const modifier = interaction.options.getInteger('modifier');
-            const manualPenalties = interaction.options.getString('penalties');
-            const player = interaction.user;
-            const playerMember = interaction.member;
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-            const characterName = data.characterName;
-
-            // Initialize penalty tracking if needed
-            if (!attackPenalties.has(player.id)) {
-                attackPenalties.set(player.id, { gate: 0, damageReduction: 0, blind: false });
-            }
-
-            // Increment attack counter
-            const currentCount = (attackCounters.get(player.id) || 0) + 1;
-            attackCounters.set(player.id, currentCount);
-
-            // Get cumulative penalties
-            const penalties = attackPenalties.get(player.id);
-
-            // Check if needs penalty prompt (2nd+ attack without manual penalty)
-            if (currentCount >= 2 && !manualPenalties) {
-                // Show penalty selection buttons
-                const currentPenaltiesText = [];
-                if (penalties.gate > 0) currentPenaltiesText.push(`Gate +${penalties.gate}`);
-                if (penalties.damageReduction > 0) currentPenaltiesText.push(`Modifier -${penalties.damageReduction}%`);
-                if (penalties.blind) currentPenaltiesText.push(`Blind (Gate 3)`);
-                
-                const row = new ActionRowBuilder()
-                    .addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_gate`)
-                            .setLabel('🎯 Gate +1')
-                            .setStyle(ButtonStyle.Primary),
-                        new ButtonBuilder()
-                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_damage50`)
-                            .setLabel('⚔️ -50% Modifier')
-                            .setStyle(ButtonStyle.Danger),
-                        new ButtonBuilder()
-                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_damage100`)
-                            .setLabel('⚔️ No Modifier')
-                            .setStyle(ButtonStyle.Danger),
-                        new ButtonBuilder()
-                            .setCustomId(`penalty_attack_${player.id}_${dice1}_${dice2}_${modifier}_blind`)
-                            .setLabel('👁️ Blind (Gate 3)')
-                            .setStyle(ButtonStyle.Secondary)
-                            .setDisabled(penalties.blind) // Can only apply once
-                    );
-
-                let description = `**${characterName}**, choose ONE penalty to ADD:`;
-                if (currentPenaltiesText.length > 0) {
-                    description += `\n\n**Current Penalties:** ${currentPenaltiesText.join(', ')}`;
-                }
-
-                const embed = new EmbedBuilder()
-                    .setColor(0xFFAA00)
-                    .setTitle(`⚠️ Multi-Attack Penalty (${currentCount}${currentCount === 2 ? 'nd' : currentCount === 3 ? 'rd' : 'th'} Attack)`)
-                    .setDescription(description)
-                    .addFields(
-                        { name: '🎯 Gate +1', value: 'Adds +1 to gate (cumulative)', inline: true },
-                        { name: '⚔️ -50% Modifier', value: 'Reduces modifier by 50%', inline: true },
-                        { name: '⚔️ No Modifier', value: 'Removes all modifier', inline: true },
-                        { name: '👁️ Blind', value: 'Sets gate to 3 (max, once only)', inline: true }
-                    )
-                    .setFooter({ text: `Attack #${currentCount} • Penalties are cumulative` })
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed], components: [row] });
-                return;
-            }
-
-            // Apply manual penalty if provided
-            if (manualPenalties) {
-                if (manualPenalties === 'gate') {
-                    penalties.gate += 1;
-                } else if (manualPenalties === 'damage50') {
-                    penalties.damageReduction += 50;
-                } else if (manualPenalties === 'damage100') {
-                    penalties.damageReduction += 100;
-                } else if (manualPenalties === 'blind') {
-                    penalties.blind = true;
-                }
-            }
-
-            // Calculate final gate (blind sets to 3, otherwise 1 + gate penalties)
-            const gate = penalties.blind ? 3 : (1 + penalties.gate);
-            const damageMultiplier = Math.max(0, 1 - (penalties.damageReduction / 100));
-            const finalModifier = Math.floor(modifier * damageMultiplier);
-
-            // Build penalty text
-            const penaltyTexts = [];
-            if (penalties.blind) penaltyTexts.push(`Blind (Gate 3)`);
-            else if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
-            if (penalties.damageReduction > 0) penaltyTexts.push(`Modifier -${penalties.damageReduction}%`);
-            const penaltyText = penaltyTexts.length > 0 ? penaltyTexts.join(', ') : 'None';
-
-            // Roll the dice
+            // Roll
             const roll1 = Math.floor(Math.random() * dice1) + 1;
             const roll2 = Math.floor(Math.random() * dice2) + 1;
-            const total = roll1 + roll2;
             const highRoll = Math.max(roll1, roll2);
-            const damage = highRoll + finalModifier;
-
-            // Determine hit/miss/fumble/crit
-            const isFumble = roll1 === 1 && roll2 === 1;
-            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-            const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-            // Build result text
-            let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount})\n`;
-            if (penaltyText !== 'None') resultText += `> *Penalties: ${penaltyText}*\n`;
-            resultText += `> \n`;
-            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
-            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-            resultText += `> \n`;
-            resultText += `> HighRoll = **${highRoll}**\n`;
-            if (penalties.damageReduction > 0) {
-                resultText += `> Original: HR + ${modifier}\n`;
-                resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
-            } else {
-                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-            }
-            resultText += `> \n`;
+            const damage = highRoll + modifier;
             
-            if (isFumble) {
-                resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-            } else if (isCrit) {
-                resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-            } else if (isHit) {
-                resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-            } else {
-                resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-            }
-
-            const embed = new EmbedBuilder()
-                .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                .setTitle(`🎲 Attack Roll`)
-                .setDescription(resultText)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'cast') {
-            const dice1 = interaction.options.getInteger('dice1');
-            const dice2 = interaction.options.getInteger('dice2');
-            const modifier = interaction.options.getInteger('modifier');
-            const manualPenalties = interaction.options.getString('penalties');
-            const player = interaction.user;
-            const playerMember = interaction.member;
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-            const characterName = data.characterName;
-
-            // Increment cast counter
-            const currentCount = (castCounters.get(player.id) || 0) + 1;
-            castCounters.set(player.id, currentCount);
-
-            // Calculate MP penalty text only (no auto reduction)
-            let mpPenaltyText = '';
-            if (currentCount === 2) {
-                mpPenaltyText = 'Multi-Cast Penalty: Extra 10 MP';
-            } else if (currentCount >= 3) {
-                mpPenaltyText = 'Multi-Cast Penalty: Extra 20 MP';
-            }
-
-            // Apply manual penalties only
-            let gate = 1;
-            let finalModifier = modifier;
-            let penaltyText = '';
-
-            if (manualPenalties) {
-                if (manualPenalties === 'gate') {
-                    gate = 2;
-                    penaltyText = 'Gate +1';
-                } else if (manualPenalties === 'damage50') {
-                    finalModifier = Math.floor(modifier / 2);
-                    penaltyText = 'Damage -50%';
-                } else if (manualPenalties === 'damage100') {
-                    finalModifier = 0;
-                    penaltyText = 'Damage -100%';
-                }
-            }
-
-            // Roll the dice
-            const roll1 = Math.floor(Math.random() * dice1) + 1;
-            const roll2 = Math.floor(Math.random() * dice2) + 1;
-            const total = roll1 + roll2;
-            const highRoll = Math.max(roll1, roll2);
-            const damage = highRoll + finalModifier;
-
-            // Determine hit/miss/fumble/crit
+            // Check result
             const isFumble = roll1 === 1 && roll2 === 1;
-            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-            const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-            // Build result text
-            let resultText = `> **${characterName}** ✨ (Cast #${currentCount})\n`;
-            if (mpPenaltyText) resultText += `> *${mpPenaltyText}*\n`;
-            if (penaltyText) resultText += `> *Penalty: ${penaltyText}*\n`;
-            resultText += `> \n`;
-            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
-            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-            resultText += `> \n`;
-            resultText += `> HighRoll = **${highRoll}**\n`;
-            if (penaltyText.includes('Damage')) {
-                resultText += `> Original: HR + ${modifier}\n`;
-                resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
-            } else {
-                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-            }
-            resultText += `> \n`;
-            
-            if (isFumble) {
-                resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-            } else if (isCrit) {
-                resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-            } else if (isHit) {
-                resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-            } else {
-                resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-            }
-
-            const embed = new EmbedBuilder()
-                .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                .setTitle(`🎲 Cast Roll`)
-                .setDescription(resultText)
-                .setFooter({ text: `${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP}` })
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'check') {
-            const dice1 = interaction.options.getInteger('dice1');
-            const dice2 = interaction.options.getInteger('dice2');
-            const gate = interaction.options.getInteger('gate');
-            const player = interaction.options.getUser('player') || interaction.user;
-            const playerMember = player.id === interaction.user.id 
-                ? interaction.member 
-                : await interaction.guild.members.fetch(player.id);
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-            const characterName = data.characterName;
-
-            // Roll the dice
-            const roll1 = Math.floor(Math.random() * dice1) + 1;
-            const roll2 = Math.floor(Math.random() * dice2) + 1;
-            const total = roll1 + roll2;
-
-            // Determine success/fail/fumble/crit
-            const isFumble = roll1 === 1 && roll2 === 1;
-            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 >= 6;
             const isSuccess = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-            // Build result text
-            let resultText = `> **${characterName}** 🎲\n`;
-            resultText += `> \n`;
-            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
-            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-            resultText += `> \n`;
+            
+            // Build result
+            let resultText = `**${data.characterName}** attacks!\n\n`;
+            resultText += `🎲 d${dice1}: **${roll1}** | d${dice2}: **${roll2}**\n`;
+            resultText += `Gate: ≤${gate}\n\n`;
+            resultText += `HighRoll = **${highRoll}**\n`;
+            resultText += `HR + ${modifier} = **${damage} damage**\n\n`;
             
             if (isFumble) {
-                resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
+                resultText += `💀 **FUMBLE!** (Auto-Miss)`;
             } else if (isCrit) {
-                resultText += `> ⭐ **CRITICAL SUCCESS!** (Auto-Success)`;
+                resultText += `⭐ **CRITICAL!** (Auto-Hit)`;
             } else if (isSuccess) {
-                resultText += `> ✅ **SUCCESS** (Both dice > ${gate})`;
+                resultText += `✅ **HIT!** (Both dice > ${gate})`;
             } else {
-                resultText += `> ❌ **FAIL** (At least one die ≤ ${gate})`;
+                resultText += `❌ **MISS** (At least one die ≤ ${gate})`;
             }
-
+            
             const embed = new EmbedBuilder()
                 .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isSuccess ? 0x00FF00 : 0xFF0000)
-                .setTitle(`🎲 Skill Check`)
                 .setDescription(resultText)
                 .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'round') {
-            // Defer reply immediately to prevent timeout
-            await interaction.deferReply();
-
-            if (!activeEncounter.active) {
-                await interaction.editReply({ content: 'No active clash. Use `/clash start` first.' });
-                return;
-            }
-
-            if (activeEncounter.combatants.length === 0) {
-                await interaction.editReply({ content: 'No combatants in the clash.' });
-                return;
-            }
-
-            // Reset attack and cast counters and penalties for all players
-            attackCounters.clear();
-            castCounters.clear();
-            attackPenalties.clear();
-            castPenalties.clear();
             
-            // Reset turn tracking
-            activeEncounter.turnsTaken.clear();
-
-            const mentions = [];
-            for (const userId of activeEncounter.combatants) {
-                mentions.push(`<@${userId}>`);
-            }
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('🔄 New Round Started!')
-                .setDescription(`✅ Attack & Cast penalties reset\n✅ Turn tracker reset\n\nUse \`/clash list\` to see current stats`)
-                .setFooter({ text: 'Good luck in the new round!' })
-                .setTimestamp();
-
-            await interaction.editReply({ 
-                content: mentions.join(' '),
-                embeds: [embed] 
-            });
-
-        } else if (commandName === 'ac') {
-            const player = interaction.user;
-            const playerMember = interaction.member;
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            data.Armor = 0;
-            data.Barrier = 0;
-
-            await saveData();
-
-            const embed = new EmbedBuilder()
-                .setColor(0xFF6B6B)
-                .setTitle('💨 Armor & Barrier Cleared')
-                .setDescription(`**${data.characterName}**'s protections cleared!\n\n💥 Armor: 0\n🛡️ Barrier: 0`)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'defend') {
-            const player = interaction.user;
-            const playerMember = interaction.member;
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            const oldArmor = data.Armor;
-            const oldBarrier = data.Barrier;
-
-            data.Armor += data.maxArmor;
-            data.Barrier += data.maxBarrier;
-
-            await saveData();
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('🛡️ Defended!')
-                .setDescription(`**${data.characterName}** raised their guard!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}`)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'resetpenalty') {
-            const type = interaction.options.getString('type') || 'both'; // Default to both
-            const player = interaction.options.getUser('player') || interaction.user; // Default to self
-
-            // Reset based on type
-            if (type === 'attack' || type === 'both') {
-                attackCounters.delete(player.id);
-                attackPenalties.delete(player.id);
-            }
-            
-            if (type === 'cast' || type === 'both') {
-                castCounters.delete(player.id);
-                castPenalties.delete(player.id);
-            }
-
-            const playerMember = player.id === interaction.user.id 
-                ? interaction.member 
-                : await interaction.guild.members.fetch(player.id);
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            // Build description based on what was reset
-            let resetDescription;
-            if (type === 'both') {
-                resetDescription = `**${data.characterName}**'s attack and cast penalties have been reset to 0.`;
-            } else {
-                resetDescription = `**${data.characterName}**'s ${type} penalty and counter have been reset to 0.`;
-            }
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('✅ Penalty Reset')
-                .setDescription(resetDescription)
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'viewall') {
-            if (playerData.size === 0) {
-                await interaction.reply('No player data available yet.');
-                return;
-            }
-
-            // Sort players alphabetically by character name
-            const sortedPlayers = Array.from(playerData.entries())
-                .sort((a, b) => a[1].characterName.localeCompare(b[1].characterName));
-
-            const embed = new EmbedBuilder()
-                .setColor(0x9B59B6)
-                .setTitle('📊 All Players - Resources Overview')
-                .setTimestamp();
-
-            for (const [userId, data] of sortedPlayers) {
-                // Compact format like /clash list
-                let valueText = `${RESOURCE_EMOJIS.HP} HP: ${data.HP}/${data.maxHP} | ${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP} | ${RESOURCE_EMOJIS.IP} IP: ${data.IP}/${data.maxIP} | ${RESOURCE_EMOJIS.Armor} Armor: ${data.Armor}/${data.maxArmor} | ${RESOURCE_EMOJIS.Barrier} Barrier: ${data.Barrier}/${data.maxBarrier}`;
-                
-                if (data.statusEffects && data.statusEffects.length > 0) {
-                    const statusText = data.statusEffects
-                        .map(s => `${s.name} (${s.duration})`)
-                        .join(', ');
-                    valueText += `\n🔮 ${statusText}`;
-                }
-
-                embed.addFields({
-                    name: data.characterName,
-                    value: valueText,
-                    inline: false
-                });
-            }
-
-            embed.setFooter({ text: `${sortedPlayers.length} player(s) total` });
-
-            await interaction.reply({ embeds: [embed] });
-        } else if (commandName === 'clash') {
-            const subcommand = interaction.options.getSubcommand();
-
-            if (subcommand === 'start') {
-                if (activeEncounter.active) {
-                    await interaction.reply({ content: 'A clash is already active! Use `/clash end` to end it first.', ephemeral: true });
-                    return;
-                }
-
-                activeEncounter.active = true;
-                activeEncounter.combatants = [];
-                activeEncounter.turnsTaken = new Set(); // Initialize turn tracker
-                saveData();
-
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF6B6B)
-                    .setTitle('⚔️ Clash Started!')
-                    .setDescription('Use `/clash add` to add players to this clash.\nUse `/clash list` to view active combatants.')
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-
-            } else if (subcommand === 'end') {
-                if (!activeEncounter.active) {
-                    await interaction.reply({ content: 'No active clash to end.', ephemeral: true });
-                    return;
-                }
-
-                const combatantCount = activeEncounter.combatants.length;
-                activeEncounter.active = false;
-                activeEncounter.combatants = [];
-                activeEncounter.turnsTaken.clear();
-                saveData();
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x00FF00)
-                    .setTitle('✅ Clash Ended')
-                    .setDescription(`Clash completed with ${combatantCount} combatant(s).`)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-
-            } else if (subcommand === 'add') {
-                if (!activeEncounter.active) {
-                    await interaction.reply({ content: 'No active clash. Use `/clash start` first.', ephemeral: true });
-                    return;
-                }
-
-                const playersInput = interaction.options.getString('players');
-                let targetPlayers = [];
-                
-                if (playersInput) {
-                    const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
-                    targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
-                } else {
-                    targetPlayers = [interaction.user.id];
-                }
-
-                const added = [];
-                const alreadyIn = [];
-                const noData = [];
-
-                for (const userId of targetPlayers) {
-                    try {
-                        const playerMember = await interaction.guild.members.fetch(userId);
-                        
-                        if (!playerData.has(userId)) {
-                            noData.push(playerMember.displayName);
-                            continue;
-                        }
-
-                        if (activeEncounter.combatants.includes(userId)) {
-                            alreadyIn.push(playerData.get(userId).characterName);
-                            continue;
-                        }
-
-                        activeEncounter.combatants.push(userId);
-                        added.push(playerData.get(userId).characterName);
-                    } catch (error) {
-                        console.error(`Error adding player ${userId}:`, error);
-                    }
-                }
-
-                saveData();
-
-                let description = '';
-                if (added.length > 0) description += `✅ Added: ${added.join(', ')}\n`;
-                if (alreadyIn.length > 0) description += `⚠️ Already in: ${alreadyIn.join(', ')}\n`;
-                if (noData.length > 0) description += `❌ No data: ${noData.join(', ')}`;
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x00FF00)
-                    .setTitle('➕ Players Added to Clash')
-                    .setDescription(description || 'No players added')
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-
-            } else if (subcommand === 'remove') {
-                if (!activeEncounter.active) {
-                    await interaction.reply({ content: 'No active clash.', ephemeral: true });
-                    return;
-                }
-
-                const playersInput = interaction.options.getString('players');
-                if (!playersInput) {
-                    await interaction.reply({ content: 'Please mention at least one player to remove.', ephemeral: true });
-                    return;
-                }
-
-                const mentions = playersInput.match(/<@!?(\d+)>/g) || [];
-                const targetPlayers = mentions.map(m => m.match(/<@!?(\d+)>/)[1]);
-
-                const removed = [];
-                const notIn = [];
-
-                for (const userId of targetPlayers) {
-                    const index = activeEncounter.combatants.indexOf(userId);
-                    if (index !== -1) {
-                        activeEncounter.combatants.splice(index, 1);
-                        const data = playerData.get(userId);
-                        removed.push(data ? data.characterName : 'Unknown');
-                    } else {
-                        notIn.push('Player');
-                    }
-                }
-
-                saveData();
-
-                let description = '';
-                if (removed.length > 0) description += `✅ Removed: ${removed.join(', ')}\n`;
-                if (notIn.length > 0) description += `⚠️ Not in clash: ${notIn.length} player(s)`;
-
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF6B6B)
-                    .setTitle('➖ Players Removed from Clash')
-                    .setDescription(description || 'No players removed')
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-
-            } else if (subcommand === 'list') {
-                if (!activeEncounter.active) {
-                    await interaction.reply('No active clash. Use `/clash start` to begin.');
-                    return;
-                }
-
-                if (activeEncounter.combatants.length === 0) {
-                    await interaction.reply('No combatants in the current clash. Use `/clash add` to add players.');
-                    return;
-                }
-
-                // Sort combatants alphabetically by character name
-                const sortedCombatants = activeEncounter.combatants
-                    .map(userId => ({ userId, data: playerData.get(userId) }))
-                    .filter(c => c.data) // Remove any missing data
-                    .sort((a, b) => a.data.characterName.localeCompare(b.data.characterName));
-
-                const embed = new EmbedBuilder()
-                    .setColor(0xFFFFFF)
-                    .setTitle('⚔️ Active Clash - Combatants')
-                    .setTimestamp();
-
-                for (const { userId, data } of sortedCombatants) {
-                    // Turn checkbox
-                    const turnDone = activeEncounter.turnsTaken.has(userId);
-                    const checkbox = turnDone ? '✅' : '⬜';
-                    
-                    let valueText = `${checkbox} ${RESOURCE_EMOJIS.HP} HP: ${data.HP}/${data.maxHP} | ${RESOURCE_EMOJIS.MP} MP: ${data.MP}/${data.maxMP} | ${RESOURCE_EMOJIS.IP} IP: ${data.IP}/${data.maxIP} | ${RESOURCE_EMOJIS.Armor} Armor: ${data.Armor}/${data.maxArmor} | ${RESOURCE_EMOJIS.Barrier} Barrier: ${data.Barrier}/${data.maxBarrier}`;
-                    
-                    if (data.statusEffects && data.statusEffects.length > 0) {
-                        const statusText = data.statusEffects
-                            .map(s => `${s.name} (${s.duration})`)
-                            .join(', ');
-                        valueText += `\n🔮 ${statusText}`;
-                    }
-
-                    embed.addFields({
-                        name: data.characterName,
-                        value: valueText,
-                        inline: false
-                    });
-                }
-
-                // Show turn progress
-                const totalCombatants = sortedCombatants.length;
-                const turnsDone = activeEncounter.turnsTaken.size;
-                embed.setFooter({ text: `${turnsDone}/${totalCombatants} turns complete | Use /eot to mark turn done` });
-
-                await interaction.reply({ embeds: [embed] });
-            
-            } else if (subcommand === 'init') {
-                if (!activeEncounter.active) {
-                    await interaction.reply('No active clash. Use `/clash start` to begin.');
-                    return;
-                }
-
-                if (activeEncounter.combatants.length === 0) {
-                    await interaction.reply('No combatants in the current clash. Use `/clash add` to add players.');
-                    return;
-                }
-
-                // Sort combatants alphabetically by character name
-                const sortedCombatants = activeEncounter.combatants
-                    .map(userId => ({ userId, data: playerData.get(userId) }))
-                    .filter(c => c.data)
-                    .sort((a, b) => a.data.characterName.localeCompare(b.data.characterName));
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x00BFFF)
-                    .setTitle('🎯 Initiative Tracker')
-                    .setTimestamp();
-
-                let initText = '';
-                for (const { userId, data } of sortedCombatants) {
-                    const hasTaken = activeEncounter.turnsTaken.has(userId);
-                    const checkbox = hasTaken ? '✅' : '⬜';
-                    initText += `${checkbox} ${data.characterName}\n`;
-                }
-
-                const takenCount = activeEncounter.turnsTaken.size;
-                const totalCount = sortedCombatants.length;
-
-                embed.setDescription(initText);
-                embed.setFooter({ text: `${takenCount}/${totalCount} players have taken their turn` });
-
-                await interaction.reply({ embeds: [embed] });
-            }
-
-        } else if (commandName === 'actionsave') {
-            const subcommand = interaction.options.getSubcommand();
-            const player = interaction.user;
-            const playerMember = interaction.member;
-
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            if (subcommand === 'add') {
-                const actionName = interaction.options.getString('name').toLowerCase();
-                const type = interaction.options.getString('type');
-                const dice1 = interaction.options.getInteger('dice1');
-                const dice2 = interaction.options.getInteger('dice2');
-                const modifier = interaction.options.getInteger('modifier');
-                const mpCost = interaction.options.getInteger('mpcost') || 0;
-
-                // Validate: cast must have MP cost
-                if (type === 'cast' && mpCost === 0) {
-                    await interaction.reply({ content: 'Cast actions must have an MP cost! Use the `mpcost` parameter.', ephemeral: true });
-                    return;
-                }
-
-                // Save to player data
-                data.savedActions[actionName] = { type, dice1, dice2, modifier, mpCost };
-                saveData(); // Persist to database
-
-                const typeEmoji = type === 'attack' ? '⚔️' : '✨';
-                const typeLabel = type === 'attack' ? 'Attack' : 'Cast';
-                let description = `${typeEmoji} **${typeLabel}**: d${dice1}+d${dice2}, +${modifier} modifier`;
-                if (type === 'cast') {
-                    description += `\n💧 MP Cost: ${mpCost} (2nd: +10, 3rd+: +20)`;
-                }
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x00FF00)
-                    .setTitle('✅ Action Saved')
-                    .setDescription(`**/${actionName}**\n${description}`)
-                    .setFooter({ text: `Use /${actionName} to execute this action` })
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-
-            } else if (subcommand === 'list') {
-                if (!data.savedActions || Object.keys(data.savedActions).length === 0) {
-                    await interaction.reply({ content: 'You have no saved actions. Use `/actionsave add` to create one!', ephemeral: true });
-                    return;
-                }
-
-                const embed = new EmbedBuilder()
-                    .setColor(0x0099FF)
-                    .setTitle('📋 Your Saved Actions')
-                    .setTimestamp();
-
-                let description = '';
-                for (const [name, action] of Object.entries(data.savedActions)) {
-                    const typeEmoji = action.type === 'attack' ? '⚔️' : '✨';
-                    description += `${typeEmoji} **/${name}** - d${action.dice1}+d${action.dice2}, +${action.modifier} mod`;
-                    if (action.type === 'cast') {
-                        description += ` (${action.mpCost} MP)`;
-                    }
-                    description += '\n';
-                }
-
-                embed.setDescription(description);
-                embed.setFooter({ text: `${Object.keys(data.savedActions).length} saved action(s)` });
-
-                await interaction.reply({ embeds: [embed] });
-
-            } else if (subcommand === 'delete') {
-                const actionName = interaction.options.getString('name').toLowerCase();
-
-                if (!data.savedActions || !data.savedActions[actionName]) {
-                    await interaction.reply({ content: `Action "${actionName}" not found.`, ephemeral: true });
-                    return;
-                }
-
-                delete data.savedActions[actionName];
-                saveData(); // Persist to database
-
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF0000)
-                    .setTitle('🗑️ Action Deleted')
-                    .setDescription(`**/${actionName}** has been removed.`)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-            }
-
-        } else if (commandName === 'use') {
-            const actionName = interaction.options.getString('action').toLowerCase();
-            const player = interaction.user;
-            const playerMember = interaction.member;
-            
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-            
-            if (!data.savedActions || !data.savedActions[actionName]) {
-                await interaction.reply({ content: `Action "${actionName}" not found. Use \`/actionsave list\` to see your saved actions.`, ephemeral: true });
+            message.reply({ embeds: [embed] });
+            return;
+        }
+        
+        // Cast (fast!)
+        if (command === 'c' || command === 'cast') {
+            if (args.length < 4) {
+                message.reply('Usage: `$c <d1> <d2> <mod> <gate> [mp_cost]`\nExample: `$c 10 8 15 1 20`');
                 return;
             }
             
-            const action = data.savedActions[actionName];
-            const characterName = data.characterName;
-
-            // Handle CAST type
-            if (action.type === 'cast') {
-                const currentCount = (castCounters.get(player.id) || 0) + 1;
-                castCounters.set(player.id, currentCount);
-
-                let mpPenaltyText = '';
-                if (currentCount === 2) {
-                    mpPenaltyText = 'Multi-Cast Penalty: Extra 10 MP';
-                } else if (currentCount >= 3) {
-                    mpPenaltyText = 'Multi-Cast Penalty: Extra 20 MP';
-                }
-
-                const gate = 1;
-                const finalModifier = action.modifier;
-
-                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
-                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
-                const total = roll1 + roll2;
-                const highRoll = Math.max(roll1, roll2);
-                const damage = highRoll + finalModifier;
-
-                const isFumble = roll1 === 1 && roll2 === 1;
-                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-                let resultText = `> **${characterName}** ✨ (Cast #${currentCount}) - **${actionName}**\n`;
-                if (mpPenaltyText) {
-                    resultText += `> *${mpPenaltyText}*\n`;
-                }
-                resultText += `> \n`;
-                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
-                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-                resultText += `> \n`;
-                resultText += `> HighRoll = **${highRoll}**\n`;
-                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-                resultText += `> \n`;
-                
-                if (isFumble) {
-                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-                } else if (isCrit) {
-                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-                } else if (isHit) {
-                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-                } else {
-                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-                }
-
-                const embed = new EmbedBuilder()
-                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                    .setTitle(`🎲 Cast Roll`)
-                    .setDescription(resultText)
-                    .setFooter({ text: `💧 MP: ${data.MP}/${data.maxMP} | Base cost: ${action.mpCost} MP` })
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-                return;
-            }
-
-            // Handle ATTACK type
-            if (action.type === 'attack') {
-                const currentCount = (attackCounters.get(player.id) || 0) + 1;
-                attackCounters.set(player.id, currentCount);
-
-                if (!attackPenalties.has(player.id)) {
-                    attackPenalties.set(player.id, { gate: 0, damageReduction: 0, blind: false });
-                }
-                const penalties = attackPenalties.get(player.id);
-
-                if (currentCount >= 2) {
-                    const row = new ActionRowBuilder()
-                        .addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_gate`)
-                                .setLabel('🎯 Gate +1')
-                                .setStyle(ButtonStyle.Primary),
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_damage50`)
-                                .setLabel('⚔️ -50% Modifier')
-                                .setStyle(ButtonStyle.Danger),
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_damage100`)
-                                .setLabel('⚔️ No Modifier')
-                                .setStyle(ButtonStyle.Danger),
-                            new ButtonBuilder()
-                                .setCustomId(`penalty_use_${player.id}_${actionName}_${action.dice1}_${action.dice2}_${action.modifier}_blind`)
-                                .setLabel('👁️ Blind (Gate 3)')
-                                .setStyle(ButtonStyle.Secondary)
-                                .setDisabled(penalties.blind)
-                        );
-
-                    let description = `**${characterName}** using **${actionName}**, choose ONE penalty to ADD:`;
-                    const currentPenaltiesText = [];
-                    if (penalties.blind) currentPenaltiesText.push(`Blind (Gate 3)`);
-                    else if (penalties.gate > 0) currentPenaltiesText.push(`Gate +${penalties.gate}`);
-                    if (penalties.damageReduction > 0) currentPenaltiesText.push(`Modifier -${penalties.damageReduction}%`);
-                    if (currentPenaltiesText.length > 0) {
-                        description += `\n\n**Current Penalties:** ${currentPenaltiesText.join(', ')}`;
-                    }
-
-                    const embed = new EmbedBuilder()
-                        .setColor(0xFFAA00)
-                        .setTitle(`⚠️ Multi-Attack Penalty (${currentCount}${currentCount === 2 ? 'nd' : currentCount === 3 ? 'rd' : 'th'} Attack)`)
-                        .setDescription(description)
-                        .addFields(
-                            { name: '🎯 Gate +1', value: 'Adds +1 to gate (cumulative)', inline: true },
-                            { name: '⚔️ -50% Modifier', value: 'Reduces modifier by 50%', inline: true },
-                            { name: '⚔️ No Modifier', value: 'Removes all modifier', inline: true },
-                            { name: '👁️ Blind', value: 'Sets gate to 3 (max, once only)', inline: true }
-                        )
-                        .setFooter({ text: `Attack #${currentCount} • Penalties are cumulative` })
-                        .setTimestamp();
-
-                    await interaction.reply({ embeds: [embed], components: [row] });
-                    return;
-                }
-
-                const gate = penalties.blind ? 3 : (1 + penalties.gate);
-                const damageMultiplier = Math.max(0, 1 - (penalties.damageReduction / 100));
-                const finalModifier = Math.floor(action.modifier * damageMultiplier);
-
-                const roll1 = Math.floor(Math.random() * action.dice1) + 1;
-                const roll2 = Math.floor(Math.random() * action.dice2) + 1;
-                const total = roll1 + roll2;
-                const highRoll = Math.max(roll1, roll2);
-                const damage = highRoll + finalModifier;
-
-                const isFumble = roll1 === 1 && roll2 === 1;
-                const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-                const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-                let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount}) - **${actionName}**\n`;
-                if (penalties.gate > 0 || penalties.damageReduction > 0 || penalties.blind) {
-                    const penaltyTexts = [];
-                    if (penalties.blind) penaltyTexts.push(`Blind (Gate 3)`);
-                    else if (penalties.gate > 0) penaltyTexts.push(`Gate +${penalties.gate}`);
-                    if (penalties.damageReduction > 0) penaltyTexts.push(`Modifier -${penalties.damageReduction}%`);
-                    resultText += `> *Cumulative Penalties: ${penaltyTexts.join(', ')}*\n`;
-                }
-                resultText += `> \n`;
-                resultText += `> d${action.dice1}: **${roll1}**  |  d${action.dice2}: **${roll2}**\n`;
-                resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-                resultText += `> \n`;
-                resultText += `> HighRoll = **${highRoll}**\n`;
-                if (penalties.damageReduction > 0) {
-                    resultText += `> Original: HR + ${action.modifier}\n`;
-                    resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
-                } else {
-                    resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-                }
-                resultText += `> \n`;
-                
-                if (isFumble) {
-                    resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-                } else if (isCrit) {
-                    resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-                } else if (isHit) {
-                    resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-                } else {
-                    resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-                }
-
-                const embed = new EmbedBuilder()
-                    .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-                    .setTitle(`🎲 Attack Roll`)
-                    .setDescription(resultText)
-                    .setTimestamp();
-
-                await interaction.reply({ embeds: [embed] });
-                return;
-            }
-
-        } else if (commandName === 'gmattack') {
-            // Defer reply immediately to prevent timeout
-            await interaction.deferReply();
-
-            const dice1 = interaction.options.getInteger('dice1');
-            const dice2 = interaction.options.getInteger('dice2');
-            const modifier = interaction.options.getInteger('modifier');
-            const penalty = interaction.options.getString('penalty');
-            const targetsString = interaction.options.getString('targets');
-            const damageType = interaction.options.getString('damage_type') || 'armor';
-
-            // Parse gate from penalty
-            let gate = 1;
-            let finalModifier = modifier;
+            const dice1 = parseInt(args[0]);
+            const dice2 = parseInt(args[1]);
+            const modifier = parseInt(args[2]);
+            const gate = parseInt(args[3]);
+            const mpCost = args[4] ? parseInt(args[4]) : 10;
             
-            if (penalty === 'gate2') gate = 2;
-            else if (penalty === 'gate3') gate = 3;
-            else if (penalty === 'mod50') finalModifier = Math.floor(modifier * 0.5);
-            else if (penalty === 'mod100') finalModifier = 0;
-
-            // Roll dice
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
+            
+            // Check MP
+            if (data.MP < mpCost) {
+                message.reply(`❌ Not enough MP! Need ${mpCost}, have ${data.MP}`);
+                return;
+            }
+            
+            // Spend MP
+            data.MP -= mpCost;
+            
+            // Roll
             const roll1 = Math.floor(Math.random() * dice1) + 1;
             const roll2 = Math.floor(Math.random() * dice2) + 1;
-            const total = roll1 + roll2;
             const highRoll = Math.max(roll1, roll2);
-            const damage = highRoll + finalModifier;
-
-            // Determine hit/miss/fumble/crit
+            const damage = highRoll + modifier;
+            
+            // Check result
             const isFumble = roll1 === 1 && roll2 === 1;
-            const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-            const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-            // Parse targets
-            const targetMatches = targetsString.match(/<@!?(\d+)>/g) || [];
-            const targetIds = targetMatches.map(match => match.match(/\d+/)[0]);
-
-            if (targetIds.length === 0) {
-                await interaction.reply({ content: 'No valid targets found. Please mention players with @player.', ephemeral: true });
+            const isCrit = !isFumble && roll1 === roll2 && roll1 >= 6;
+            const isSuccess = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+            
+            // Build result
+            let resultText = `**${data.characterName}** casts!\n\n`;
+            resultText += `💧 MP: ${data.MP + mpCost} → ${data.MP} (-${mpCost})\n\n`;
+            resultText += `🎲 d${dice1}: **${roll1}** | d${dice2}: **${roll2}**\n`;
+            resultText += `Gate: ≤${gate}\n\n`;
+            resultText += `HighRoll = **${highRoll}**\n`;
+            resultText += `HR + ${modifier} = **${damage} damage**\n\n`;
+            
+            if (isFumble) {
+                resultText += `💀 **FUMBLE!** (Auto-Miss)`;
+            } else if (isCrit) {
+                resultText += `⭐ **CRITICAL!** (Auto-Hit)`;
+            } else if (isSuccess) {
+                resultText += `✅ **HIT!** (Both dice > ${gate})`;
+            } else {
+                resultText += `❌ **MISS** (At least one die ≤ ${gate})`;
+            }
+            
+            const embed = new EmbedBuilder()
+                .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isSuccess ? 0x00FF00 : 0xFF0000)
+                .setDescription(resultText)
+                .setTimestamp();
+            
+            message.reply({ embeds: [embed] });
+            return;
+        }
+        
+        // HP (fast!)
+        if (command === 'hp') {
+            if (args.length === 0) {
+                message.reply('Usage: `$hp <amount|full|zero>`\nExample: `$hp -20` or `$hp full`');
                 return;
             }
-
-            // Build initial result
+            
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
+            
+            const oldHP = data.HP;
+            
+            if (args[0] === 'full') {
+                data.HP = data.maxHP;
+            } else if (args[0] === 'zero') {
+                data.HP = 0;
+            } else {
+                const amount = parseInt(args[0]);
+                data.HP = Math.max(0, Math.min(data.maxHP, data.HP + amount));
+            }
+            
+            message.reply(`❤️ **${data.characterName}** HP: ${oldHP} → ${data.HP}/${data.maxHP}`);
+            return;
+        }
+        
+        // MP (fast!)
+        if (command === 'mp') {
+            if (args.length === 0) {
+                message.reply('Usage: `$mp <amount|full|zero>`');
+                return;
+            }
+            
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
+            
+            const oldMP = data.MP;
+            
+            if (args[0] === 'full') {
+                data.MP = data.maxMP;
+            } else if (args[0] === 'zero') {
+                data.MP = 0;
+            } else {
+                const amount = parseInt(args[0]);
+                data.MP = Math.max(0, Math.min(data.maxMP, data.MP + amount));
+            }
+            
+            message.reply(`💧 **${data.characterName}** MP: ${oldMP} → ${data.MP}/${data.maxMP}`);
+            return;
+        }
+        
+        // Armor (fast!)
+        if (command === 'armor') {
+            if (args.length === 0) {
+                message.reply('Usage: `$armor <amount|full|zero>`');
+                return;
+            }
+            
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
+            
+            const oldArmor = data.Armor;
+            
+            if (args[0] === 'full') {
+                data.Armor = data.maxArmor;
+            } else if (args[0] === 'zero') {
+                data.Armor = 0;
+            } else {
+                const amount = parseInt(args[0]);
+                data.Armor = Math.max(0, data.Armor + amount);
+            }
+            
+            message.reply(`💥 **${data.characterName}** Armor: ${oldArmor} → ${data.Armor}/${data.maxArmor}`);
+            return;
+        }
+        
+        // Barrier (fast!)
+        if (command === 'barrier') {
+            if (args.length === 0) {
+                message.reply('Usage: `$barrier <amount|full|zero>`');
+                return;
+            }
+            
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
+            
+            const oldBarrier = data.Barrier;
+            
+            if (args[0] === 'full') {
+                data.Barrier = data.maxBarrier;
+            } else if (args[0] === 'zero') {
+                data.Barrier = 0;
+            } else {
+                const amount = parseInt(args[0]);
+                data.Barrier = Math.max(0, data.Barrier + amount);
+            }
+            
+            message.reply(`🛡️ **${data.characterName}** Barrier: ${oldBarrier} → ${data.Barrier}/${data.maxBarrier}`);
+            return;
+        }
+        
+        // Defend (fast!)
+        if (command === 'defend') {
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
+            
+            const oldArmor = data.Armor;
+            const oldBarrier = data.Barrier;
+            
+            data.Armor += data.maxArmor;
+            data.Barrier += data.maxBarrier;
+            
+            message.reply(`🛡️ **${data.characterName}** defended!\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}`);
+            return;
+        }
+        
+        // Turn (fast!)
+        if (command === 'turn') {
+            const targetUser = message.mentions.users.first() || message.author;
+            const targetMember = await message.guild.members.fetch(targetUser.id);
+            
+            initPlayer(targetUser.id, targetMember.displayName);
+            const data = playerData.get(targetUser.id);
+            
+            data.Armor = 0;
+            data.Barrier = 0;
+            
+            message.reply(`💨 **${data.characterName}** turn reset!\n💥 Armor: 0\n🛡️ Barrier: 0`);
+            return;
+        }
+        
+        // Rest (fast!)
+        if (command === 'rest') {
+            const userId = message.author.id;
+            initPlayer(userId, message.member.displayName);
+            const data = playerData.get(userId);
+            
+            data.HP = data.maxHP;
+            data.MP = data.maxMP;
+            
+            message.reply(`✨ **${data.characterName}** rested!\n❤️ HP: ${data.HP}/${data.maxHP}\n💧 MP: ${data.MP}/${data.maxMP}`);
+            return;
+        }
+        
+        // GM Attack
+        if (command === 'gmattack') {
+            if (args.length < 5) {
+                message.reply('Usage: `$gmattack <d1> <d2> <mod> <gate> <@targets> [armor|barrier|true]`\nExample: `$gmattack 10 8 15 1 @Tank @DPS`');
+                return;
+            }
+            
+            const dice1 = parseInt(args[0]);
+            const dice2 = parseInt(args[1]);
+            const modifier = parseInt(args[2]);
+            const gate = parseInt(args[3]);
+            
+            // Find damage type (last arg if it's armor/barrier/true)
+            let damageType = 'armor';
+            const lastArg = args[args.length - 1].toLowerCase();
+            if (lastArg === 'armor' || lastArg === 'barrier' || lastArg === 'true') {
+                damageType = lastArg;
+                args.pop(); // Remove from args
+            }
+            
+            // Get targets from mentions
+            const targetMatches = message.content.match(/<@!?(\d+)>/g) || [];
+            const targetIds = targetMatches.map(match => match.match(/\d+/)[0]);
+            
+            if (targetIds.length === 0) {
+                message.reply('❌ No valid targets found. Mention players with @player');
+                return;
+            }
+            
+            // Roll
+            const roll1 = Math.floor(Math.random() * dice1) + 1;
+            const roll2 = Math.floor(Math.random() * dice2) + 1;
+            const highRoll = Math.max(roll1, roll2);
+            const damage = highRoll + modifier;
+            
+            // Check result
+            const isFumble = roll1 === 1 && roll2 === 1;
+            const isCrit = !isFumble && roll1 === roll2 && roll1 >= 6;
+            const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
+            
+            // Build result
             let resultText = `> **GM Attack** ⚔️\n`;
             resultText += `> \n`;
-            resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
-            resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
+            resultText += `> d${dice1}: **${roll1}** | d${dice2}: **${roll2}**\n`;
+            resultText += `> Gate: ≤${gate}\n`;
             resultText += `> \n`;
             resultText += `> HighRoll = **${highRoll}**\n`;
-            if (penalty === 'mod50' || penalty === 'mod100') {
-                resultText += `> Original: HR + ${modifier}\n`;
-                resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
-            } else {
-                resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-            }
+            resultText += `> HR + ${modifier} = **${damage} damage**\n`;
             resultText += `> \n`;
             
             if (isFumble) {
-                resultText += `> 💀 **FUMBLE!** (Auto-Miss)\n`;
-                resultText += `> No damage dealt.`;
+                resultText += `> 💀 **FUMBLE!** (Auto-Miss)`;
                 
                 const embed = new EmbedBuilder()
                     .setColor(0x800000)
                     .setTitle('🎲 GM Attack')
                     .setDescription(resultText)
                     .setTimestamp();
-
-                await interaction.editReply({ embeds: [embed] });
+                
+                message.reply({ embeds: [embed] });
                 return;
-            } else if (isCrit) {
-                resultText += `> ⭐ **CRITICAL!** (Auto-Hit)`;
-            } else if (isHit) {
-                resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-            } else {
-                resultText += `> ❌ **MISS** (At least one die ≤ ${gate})\n`;
-                resultText += `> No damage dealt.`;
+            } else if (!isHit) {
+                resultText += `> ❌ **MISS**`;
                 
                 const embed = new EmbedBuilder()
                     .setColor(0xFF0000)
                     .setTitle('🎲 GM Attack')
                     .setDescription(resultText)
                     .setTimestamp();
-
-                await interaction.editReply({ embeds: [embed] });
+                
+                message.reply({ embeds: [embed] });
                 return;
             }
-
-            // Attack hit - simple defend or take damage
+            
+            // Hit!
+            if (isCrit) {
+                resultText += `> ⭐ **CRITICAL!** (Auto-Hit)`;
+            } else {
+                resultText += `> ✅ **HIT!**`;
+            }
+            
             const embed = new EmbedBuilder()
                 .setColor(isCrit ? 0xFFD700 : 0x00FF00)
                 .setTitle('🎲 GM Attack - HIT!')
@@ -2298,140 +719,179 @@ client.on('interactionCreate', async interaction => {
                 })
                 .setFooter({ text: `${damage} ${damageType} damage incoming!` })
                 .setTimestamp();
-
-            // Simple buttons: Defend or Take Damage
+            
+            // Buttons
             const row = new ActionRowBuilder()
                 .addComponents(
                     new ButtonBuilder()
-                        .setCustomId(`gmattack_defend_${damage}_${damageType}_${interaction.id}`)
-                        .setLabel('🛡️ Defend')
+                        .setCustomId(`gmattack_defend_${damage}_${damageType}_${message.id}`)
+                        .setLabel('🛡️ React with Defend')
                         .setStyle(ButtonStyle.Success),
                     new ButtonBuilder()
-                        .setCustomId(`gmattack_take_${damage}_${damageType}_${interaction.id}`)
+                        .setCustomId(`gmattack_take_${damage}_${damageType}_${message.id}`)
                         .setLabel('💔 Take Damage')
                         .setStyle(ButtonStyle.Danger)
                 );
-
-            await interaction.editReply({
+            
+            message.reply({
                 content: `${targetMatches.join(' ')} ⚔️ **INCOMING ATTACK!**`,
                 embeds: [embed],
                 components: [row]
             });
-
-        } else if (commandName === 'eot') {
-            if (!activeEncounter.active) {
-                await interaction.reply({ content: 'No active clash. Use `/clash start` to begin.', ephemeral: true });
-                return;
-            }
-
-            const player = interaction.options.getUser('player') || interaction.user;
-            
-            // Check if player is in the clash
-            if (!activeEncounter.combatants.includes(player.id)) {
-                await interaction.reply({ content: `${player.username} is not in the active clash.`, ephemeral: true });
-                return;
-            }
-
-            const playerMember = await interaction.guild.members.fetch(player.id);
-            initPlayer(player.id, playerMember.displayName);
-            const data = playerData.get(player.id);
-
-            // Mark turn as taken
-            activeEncounter.turnsTaken.add(player.id);
-
-            const embed = new EmbedBuilder()
-                .setColor(0x00FF00)
-                .setTitle('✅ Turn Complete')
-                .setDescription(`**${data.characterName}** has finished their turn!`)
-                .setTimestamp();
-
-            const takenCount = activeEncounter.turnsTaken.size;
-            const totalCount = activeEncounter.combatants.length;
-            embed.setFooter({ text: `${takenCount}/${totalCount} players have taken their turn` });
-
-            await interaction.reply({ embeds: [embed] });
-
-        } else if (commandName === 'guide') {
-            const embed = new EmbedBuilder()
-                .setColor(0x00BFFF)
-                .setTitle('📖 Bot Commands Guide')
-                .setDescription('Complete list of available commands')
-                .addFields(
-                    { 
-                        name: '🎮 Setup', 
-                        value: '`/set @player name hp mp ip armor barrier` - Create/update (refills Armor/Barrier)\n`/delete @player` - Delete character data\n`/view [@player]` - View resources\n`/viewall` - View all players', 
-                        inline: false 
-                    },
-                    { 
-                        name: '⚡ Quick Updates', 
-                        value: '`/hp <amount|full|zero>` - Update HP\n`/mp`, `/ip`, `/armor`, `/barrier` - Same for other resources\n`/rest` - Restore HP/MP/Armor/Barrier to full', 
-                        inline: false 
-                    },
-                    { 
-                        name: '💥 Combat', 
-                        value: '`/damage <amt> <armor|barrier> [@players]` - Apply damage\n`/round` - New round! Refills Armor/Barrier, resets penalties (GM only)', 
-                        inline: false 
-                    },
-                    { 
-                        name: '🎲 Attack/Cast System', 
-                        value: '`/attack <d1> <d2> <mod> [penalty]` - Attack roll\n• Gate starts at 1\n• 2nd+ attack: Choose penalty (cumulative)\n• Penalties: Gate +1, -50% Mod, No Mod, Blind (Gate 3)\n• Fumble (1,1) = Auto-Fail | Crit (same, ≥6) = Auto-Success\n\n`/cast <d1> <d2> <mod> [penalty]` - Cast roll\n• 2nd cast: Extra 10 MP | 3rd+: Extra 20 MP\n• No automatic penalty prompts\n• Same crit/fumble rules', 
-                        inline: false 
-                    },
-                    { 
-                        name: '🎯 Penalty Details', 
-                        value: '**Gate +1**: Increases gate by 1 (stackable)\n**-50% Modifier**: Reduces modifier by 50% (stackable)\n**No Modifier**: Sets modifier to 0\n**Blind**: Sets gate to 3 (max, once only)\n\nPenalties are **cumulative** and persist until `/round` or `/resetpenalty`', 
-                        inline: false 
-                    },
-                    { 
-                        name: '🔮 Status & Checks', 
-                        value: '`/status add <n> <duration> [@player]` - Add status\n`/status clear <n> [@player]` - Remove status\n`/tick [@player]` - Advance turn\n`/check <d1> <d2> <gate> [@player]` - Skill check', 
-                        inline: false 
-                    },
-                    { 
-                        name: '🎯 Initiative Tracker', 
-                        value: '`/clash init` - Show who has taken their turn\n`/eot [@player]` - Mark end of turn (GM or self)\n`/round` - New round, resets all checkboxes', 
-                        inline: false 
-                    },
-                    { 
-                        name: '💾 Saved Actions', 
-                        value: '`/actionsave add <n> <type> <d1> <d2> <mod> [mpcost]` - Save action\n• Type: **attack** or **cast**\n`/use <name>` - Execute saved action\n`/actionsave list` - View all', 
-                        inline: false 
-                    },
-                    { 
-                        name: '⚔️ Clash & GM Tools', 
-                        value: '`/clash start|end|add|remove|list|init` - Manage encounters\n`/gmattack <d1> <d2> <mod> <targets>` - GM attack with defend option (GM)\n`/resetpenalty [type] [@player]` - Reset penalties (GM)\n`/round` - New round (GM only)', 
-                        inline: false 
-                    },
-                    { 
-                        name: '📝 Examples', 
-                        value: '**Attack:** `/actionsave add sword attack 10 8 5`\n**Cast:** `/actionsave add fireball cast 10 8 15 20`\n**Use:** `/use sword` or `/use fireball`', 
-                        inline: false 
-                    }
-                )
-                .setFooter({ text: 'Penalties stack! Gate +1 twice = Gate ≤3 | Two -50% = No modifier' })
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [embed] });
+            return;
         }
+        
+        // Clash management
+        if (command === 'clash') {
+            const subcommand = args[0]?.toLowerCase();
+            
+            if (!subcommand) {
+                message.reply('Usage: `$clash <start|end|add|remove|list>`');
+                return;
+            }
+            
+            if (subcommand === 'start') {
+                activeEncounter.active = true;
+                activeEncounter.combatants = [];
+                activeEncounter.turnsTaken.clear();
+                message.reply('⚔️ **Clash started!** Add combatants with `$clash add @player`');
+                return;
+            }
+            
+            if (subcommand === 'end') {
+                activeEncounter.active = false;
+                activeEncounter.combatants = [];
+                activeEncounter.turnsTaken.clear();
+                message.reply('✅ **Clash ended!**');
+                return;
+            }
+            
+            if (subcommand === 'add') {
+                if (!activeEncounter.active) {
+                    message.reply('❌ No active clash. Use `$clash start` first.');
+                    return;
+                }
+                
+                const mentioned = message.mentions.users;
+                if (mentioned.size === 0) {
+                    message.reply('❌ Mention players to add: `$clash add @player1 @player2`');
+                    return;
+                }
+                
+                let added = 0;
+                for (const [userId, user] of mentioned) {
+                    if (!activeEncounter.combatants.includes(userId)) {
+                        // Load from database if exists
+                        const dbData = await loadPlayerFromDB(userId);
+                        if (dbData) {
+                            playerData.set(userId, dbData);
+                        } else {
+                            const member = await message.guild.members.fetch(userId);
+                            initPlayer(userId, member.displayName);
+                        }
+                        
+                        activeEncounter.combatants.push(userId);
+                        added++;
+                    }
+                }
+                
+                message.reply(`✅ Added ${added} combatant(s) to clash!`);
+                return;
+            }
+            
+            if (subcommand === 'remove') {
+                const mentioned = message.mentions.users;
+                if (mentioned.size === 0) {
+                    message.reply('❌ Mention players to remove: `$clash remove @player`');
+                    return;
+                }
+                
+                let removed = 0;
+                for (const [userId] of mentioned) {
+                    const index = activeEncounter.combatants.indexOf(userId);
+                    if (index > -1) {
+                        activeEncounter.combatants.splice(index, 1);
+                        removed++;
+                    }
+                }
+                
+                message.reply(`✅ Removed ${removed} combatant(s) from clash!`);
+                return;
+            }
+            
+            if (subcommand === 'list') {
+                if (!activeEncounter.active) {
+                    message.reply('❌ No active clash.');
+                    return;
+                }
+                
+                if (activeEncounter.combatants.length === 0) {
+                    message.reply('⚔️ Clash active but no combatants yet.');
+                    return;
+                }
+                
+                let list = '**Clash Combatants:**\n\n';
+                for (const userId of activeEncounter.combatants) {
+                    const data = playerData.get(userId);
+                    if (data) {
+                        const turnIcon = activeEncounter.turnsTaken.has(userId) ? '✅' : '⬜';
+                        list += `${turnIcon} **${data.characterName}**\n`;
+                        list += `❤️ ${data.HP}/${data.maxHP} | 💧 ${data.MP}/${data.maxMP} | 💥 ${data.Armor}/${data.maxArmor} | 🛡️ ${data.Barrier}/${data.maxBarrier}\n\n`;
+                    }
+                }
+                
+                message.reply(list);
+                return;
+            }
+        }
+        
+        // End of turn
+        if (command === 'eot') {
+            if (!activeEncounter.active) {
+                message.reply('❌ No active clash.');
+                return;
+            }
+            
+            const targetUser = message.mentions.users.first() || message.author;
+            activeEncounter.turnsTaken.add(targetUser.id);
+            
+            const data = playerData.get(targetUser.id);
+            const name = data ? data.characterName : targetUser.username;
+            
+            message.reply(`✅ **${name}** ended their turn!`);
+            return;
+        }
+        
+        // Round
+        if (command === 'round') {
+            if (!activeEncounter.active) {
+                message.reply('❌ No active clash.');
+                return;
+            }
+            
+            activeEncounter.turnsTaken.clear();
+            
+            const mentions = activeEncounter.combatants.map(id => `<@${id}>`).join(' ');
+            
+            message.reply(`🔄 **New Round Started!**\n✅ Turn tracker reset\n\n${mentions}`);
+            return;
+        }
+        
     } catch (error) {
-        console.error(error);
-        await interaction.reply({ content: 'An error occurred while processing the command.', ephemeral: true });
+        console.error('Command error:', error);
+        message.reply('❌ An error occurred processing that command.');
     }
 });
 
-// Handle button interactions for penalty choices
+// Button interactions (gmattack defend/take)
 client.on('interactionCreate', async interaction => {
     if (!interaction.isButton()) return;
-
+    
     const parts = interaction.customId.split('_');
     const action = parts[0];
     
-    // Handle defend buttons
-    // Handle gmattack buttons (defend or take)
     if (action === 'gmattack') {
         try {
-            await interaction.deferReply();
-
             const [, buttonType, damageStr, damageType] = parts;
             const damage = parseInt(damageStr);
             
@@ -2440,66 +900,65 @@ client.on('interactionCreate', async interaction => {
             
             initPlayer(userId, playerMember.displayName);
             const data = playerData.get(userId);
-
+            
             const oldArmor = data.Armor;
             const oldBarrier = data.Barrier;
             const oldHP = data.HP;
             let resultText = '';
-
+            
             if (buttonType === 'defend') {
-                // DEFEND: Add BOTH max armor and barrier, then take damage
+                // DEFEND: Add BOTH max
                 data.Armor += data.maxArmor;
                 data.Barrier += data.maxBarrier;
-
-                // Apply damage based on type
+                
+                // Apply damage
                 if (damageType === 'armor') {
                     const armorDamage = Math.min(damage, data.Armor);
-                    const overflowDamage = Math.max(0, damage - data.Armor);
+                    const overflow = Math.max(0, damage - data.Armor);
                     data.Armor = Math.max(0, data.Armor - damage);
                     
-                    if (overflowDamage > 0) {
-                        data.HP = Math.max(0, data.HP - overflowDamage);
-                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} (untouched)\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    if (overflow > 0) {
+                        data.HP = Math.max(0, data.HP - overflow);
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier} (untouched)\n💔 Overflow: ${overflow} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                     } else {
-                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} (untouched)`;
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} → ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier} (untouched)`;
                     }
                 } else if (damageType === 'barrier') {
                     const barrierDamage = Math.min(damage, data.Barrier);
-                    const overflowDamage = Math.max(0, damage - data.Barrier);
+                    const overflow = Math.max(0, damage - data.Barrier);
                     data.Barrier = Math.max(0, data.Barrier - damage);
                     
-                    if (overflowDamage > 0) {
-                        data.HP = Math.max(0, data.HP - overflowDamage);
-                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} (untouched)\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier}\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    if (overflow > 0) {
+                        data.HP = Math.max(0, data.HP - overflow);
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor} (untouched)\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier}\n💔 Overflow: ${overflow} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                     } else {
-                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${oldArmor + data.maxArmor} (untouched)\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier}`;
+                        resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor} (untouched)\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${oldBarrier + data.maxBarrier} → ${data.Barrier}`;
                     }
                 } else if (damageType === 'true') {
                     data.HP = Math.max(0, data.HP - damage);
                     resultText = `**${data.characterName}** DEFENDED!\n\n💥 Armor: ${oldArmor} +${data.maxArmor} = ${data.Armor}\n🛡️ Barrier: ${oldBarrier} +${data.maxBarrier} = ${data.Barrier}\n💔 True Damage: ${damage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                 }
-
             } else if (buttonType === 'take') {
-                // TAKE DAMAGE: No defense
+                // TAKE DAMAGE
                 if (damageType === 'armor') {
                     const armorDamage = Math.min(damage, data.Armor);
-                    const overflowDamage = Math.max(0, damage - data.Armor);
+                    const overflow = Math.max(0, damage - data.Armor);
                     data.Armor = Math.max(0, data.Armor - damage);
                     
-                    if (overflowDamage > 0) {
-                        data.HP = Math.max(0, data.HP - overflowDamage);
-                        resultText = `**${data.characterName}** took the hit!\n\n💥 Armor: ${oldArmor} → ${data.Armor}\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    if (overflow > 0) {
+                        data.HP = Math.max(0, data.HP - overflow);
+                        resultText = `**${data.characterName}** took the hit!\n\n💥 Armor: ${oldArmor} → ${data.Armor}\n💔 Overflow: ${overflow} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                     } else {
                         resultText = `**${data.characterName}** took the hit!\n\n💥 Armor: ${oldArmor} → ${data.Armor}`;
                     }
                 } else if (damageType === 'barrier') {
                     const barrierDamage = Math.min(damage, data.Barrier);
-                    const overflowDamage = Math.max(0, damage - data.Barrier);
+                    const overflow = Math.max(0, damage - data.Barrier);
                     data.Barrier = Math.max(0, data.Barrier - damage);
                     
-                    if (overflowDamage > 0) {
-                        data.HP = Math.max(0, data.HP - overflowDamage);
-                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Barrier: ${oldBarrier} → ${data.Barrier}\n💔 HP damage: ${overflowDamage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
+                    if (overflow > 0) {
+                        data.HP = Math.max(0, data.HP - overflow);
+                        resultText = `**${data.characterName}** took the hit!\n\n🛡️ Barrier: ${oldBarrier} → ${data.Barrier}\n💔 Overflow: ${overflow} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                     } else {
                         resultText = `**${data.characterName}** took the hit!\n\n🛡️ Barrier: ${oldBarrier} → ${data.Barrier}`;
                     }
@@ -2508,203 +967,14 @@ client.on('interactionCreate', async interaction => {
                     resultText = `**${data.characterName}** took the hit!\n\n💔 True Damage: ${damage} → HP: ${oldHP} → ${data.HP}/${data.maxHP}`;
                 }
             }
-
-            await saveData();
-            await interaction.editReply({ content: resultText });
-            return;
-
+            
+            await interaction.reply({ content: resultText });
+            
         } catch (error) {
-            console.error('Error handling gmattack button:', error);
-            try {
-                await interaction.editReply({ content: 'An error occurred.' });
-            } catch (e) {
-                console.error('Failed to send error:', e);
-            }
-            return;
+            console.error('Button error:', error);
+            await interaction.reply({ content: '❌ Error processing button.', ephemeral: true });
         }
-    }
-    
-    const type = parts[1];
-    
-    if (action !== 'penalty') return;
-    
-    // Handle both "penalty_attack_..." and "penalty_use_..." formats
-    if (type === 'attack') {
-        const [, , userId, dice1Str, dice2Str, modifierStr, penalty] = parts;
-        
-        // Only the player can click their penalty buttons
-        if (interaction.user.id !== userId) {
-            await interaction.reply({ content: 'This is not your penalty choice!', ephemeral: true });
-            return;
-        }
-
-        const dice1 = parseInt(dice1Str);
-        const dice2 = parseInt(dice2Str);
-        const modifier = parseInt(modifierStr);
-
-        initPlayer(userId, interaction.member.displayName);
-    const data = playerData.get(userId);
-    const characterName = data.characterName;
-
-    // Get current count
-    const currentCount = attackCounters.get(userId);
-
-    // Add penalty cumulatively
-    const penalties = attackPenalties.get(userId);
-    if (penalty === 'gate') {
-        penalties.gate += 1;
-    } else if (penalty === 'damage50') {
-        penalties.damageReduction += 50;
-    } else if (penalty === 'damage100') {
-        penalties.damageReduction += 100;
-    } else if (penalty === 'blind') {
-        penalties.blind = true;
-    }
-
-    // Calculate final values (blind sets gate to 3)
-    let gate = penalties.blind ? 3 : (1 + penalties.gate);
-    let damageMultiplier = 1 - (penalties.damageReduction / 100);
-    const finalModifier = Math.floor(modifier * damageMultiplier);
-
-    // Build cumulative penalty text
-    const cumulativeParts = [];
-    if (penalties.blind) cumulativeParts.push(`Blind (Gate 3)`);
-    else if (penalties.gate > 0) cumulativeParts.push(`Gate +${penalties.gate}`);
-    if (penalties.damageReduction > 0) cumulativeParts.push(`Modifier -${penalties.damageReduction}%`);
-    const cumulativeText = cumulativeParts.join(', ');
-
-    // Roll the dice
-    const roll1 = Math.floor(Math.random() * dice1) + 1;
-    const roll2 = Math.floor(Math.random() * dice2) + 1;
-    const total = roll1 + roll2;
-    const highRoll = Math.max(roll1, roll2);
-    const damage = highRoll + finalModifier;
-
-    // Determine hit/miss/fumble/crit
-    const isFumble = roll1 === 1 && roll2 === 1;
-    const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-    const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-    // Build result text
-    let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount})\n`;
-    resultText += `> *Cumulative Penalties: ${cumulativeText}*\n`;
-    resultText += `> \n`;
-    resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
-    resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-    resultText += `> \n`;
-    resultText += `> HighRoll = **${highRoll}**\n`;
-    if (damageMultiplier < 1) {
-        resultText += `> Original: HR + ${modifier}\n`;
-        resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
-    } else {
-        resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-    }
-    resultText += `> \n`;
-    
-    if (isFumble) {
-        resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-    } else if (isCrit) {
-        resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-    } else if (isHit) {
-        resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-    } else {
-        resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-    }
-
-    const embed = new EmbedBuilder()
-        .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-        .setTitle(`🎲 Attack Roll`)
-        .setDescription(resultText)
-        .setTimestamp();
-
-    await interaction.update({ embeds: [embed], components: [] });
-    
-    } else if (type === 'use') {
-        const [, , userId, actionName, dice1Str, dice2Str, modifierStr, penalty] = parts;
-        
-        // Only the player can click their penalty buttons
-        if (interaction.user.id !== userId) {
-            await interaction.reply({ content: 'This is not your penalty choice!', ephemeral: true });
-            return;
-        }
-
-        const dice1 = parseInt(dice1Str);
-        const dice2 = parseInt(dice2Str);
-        const modifier = parseInt(modifierStr);
-
-        initPlayer(userId, interaction.member.displayName);
-        const data = playerData.get(userId);
-        const characterName = data.characterName;
-
-        const currentCount = attackCounters.get(userId);
-
-        const penalties = attackPenalties.get(userId);
-        if (penalty === 'gate') {
-            penalties.gate += 1;
-        } else if (penalty === 'damage50') {
-            penalties.damageReduction += 50;
-        } else if (penalty === 'damage100') {
-            penalties.damageReduction += 100;
-        } else if (penalty === 'blind') {
-            penalties.blind = true;
-        }
-
-        let gate = penalties.blind ? 3 : (1 + penalties.gate);
-        let damageMultiplier = 1 - (penalties.damageReduction / 100);
-        const finalModifier = Math.floor(modifier * damageMultiplier);
-
-        const cumulativeParts = [];
-        if (penalties.blind) cumulativeParts.push(`Blind (Gate 3)`);
-        else if (penalties.gate > 0) cumulativeParts.push(`Gate +${penalties.gate}`);
-        if (penalties.damageReduction > 0) cumulativeParts.push(`Modifier -${penalties.damageReduction}%`);
-        const cumulativeText = cumulativeParts.join(', ');
-
-        const roll1 = Math.floor(Math.random() * dice1) + 1;
-        const roll2 = Math.floor(Math.random() * dice2) + 1;
-        const total = roll1 + roll2;
-        const highRoll = Math.max(roll1, roll2);
-        const damage = highRoll + finalModifier;
-
-        const isFumble = roll1 === 1 && roll2 === 1;
-        const isCrit = !isFumble && roll1 === roll2 && roll1 > 5;
-        const isHit = isFumble ? false : isCrit ? true : (roll1 > gate && roll2 > gate);
-
-        let resultText = `> **${characterName}** ⚔️ (Attack #${currentCount}) - **${actionName}**\n`;
-        if (cumulativeText) {
-            resultText += `> *Cumulative Penalties: ${cumulativeText}*\n`;
-        }
-        resultText += `> \n`;
-        resultText += `> d${dice1}: **${roll1}**  |  d${dice2}: **${roll2}**\n`;
-        resultText += `> Total: ${total}  •  Gate: ≤${gate}\n`;
-        resultText += `> \n`;
-        resultText += `> HighRoll = **${highRoll}**\n`;
-        if (penalties.damageReduction > 0) {
-            resultText += `> Original: HR + ${modifier}\n`;
-            resultText += `> Penalized: HR + ${finalModifier} = **${damage} damage**\n`;
-        } else {
-            resultText += `> HR + ${finalModifier} = **${damage} damage**\n`;
-        }
-        resultText += `> \n`;
-        
-        if (isFumble) {
-            resultText += `> 💀 **FUMBLE!** (Auto-Fail)`;
-        } else if (isCrit) {
-            resultText += `> ⭐ **CRITICAL!** (Auto-Success)`;
-        } else if (isHit) {
-            resultText += `> ✅ **HIT** (Both dice > ${gate})`;
-        } else {
-            resultText += `> ❌ **MISS** (At least one die ≤ ${gate})`;
-        }
-
-        const embed = new EmbedBuilder()
-            .setColor(isFumble ? 0x800000 : isCrit ? 0xFFD700 : isHit ? 0x00FF00 : 0xFF0000)
-            .setTitle(`🎲 Attack Roll`)
-            .setDescription(resultText)
-            .setTimestamp();
-
-        await interaction.update({ embeds: [embed], components: [] });
     }
 });
 
-// Login to Discord
-client.login(TOKEN);
+client.login(process.env.DISCORD_TOKEN);
